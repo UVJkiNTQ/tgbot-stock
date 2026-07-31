@@ -27,10 +27,30 @@ _rate_cache: dict[str, tuple[float, float]] = {}
 RATE_CACHE_TTL = 600.0  # 10 min
 
 
+class RateUnavailableError(RuntimeError):
+    pass
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Return the canonical symbol used by quote providers and the database."""
+    s = symbol.strip().upper()
+    if not s:
+        raise ValueError("symbol cannot be empty")
+
+    if s.endswith(".HK"):
+        s = s[:-3]
+    elif s.startswith("HK") and s[2:].isdigit():
+        s = s[2:]
+
+    # Hong Kong codes are conventionally five digits, but users commonly omit
+    # their leading zeroes (700 / 0700 instead of 00700).
+    if s.isdigit() and len(s) <= 5:
+        return s.zfill(5)
+    return s
+
+
 def detect_market(symbol: str) -> str:
-    s = symbol.upper()
-    if s.isalpha():
-        return "US"
+    s = normalize_symbol(symbol)
     if s.isdigit():
         if len(s) == 5:
             return "HK"
@@ -46,8 +66,13 @@ def market_currency(symbol: str) -> str:
     return MARKET_CURRENCY.get(detect_market(symbol), "CNY")
 
 
+def quote_currency(quote: Quote) -> str:
+    """Derive currency from the provider-confirmed market, not user input."""
+    return MARKET_CURRENCY.get(quote.market, "CNY")
+
+
 def _sina_list(symbol: str) -> str:
-    s = symbol.upper()
+    s = normalize_symbol(symbol)
     m = detect_market(s)
     if m == "HK":
         return f"hk{s.zfill(5)}"
@@ -103,6 +128,39 @@ async def _fetch_funds(symbols: list[str]) -> dict[str, Quote]:
     return results
 
 
+def _parse_sina_fields(symbol: str, fields: list[str]) -> Quote | None:
+    """Parse one Sina quote; A-share and HK payload layouts differ."""
+    market = detect_market(symbol)
+    try:
+        if market == "HK":
+            # HK: English name, Chinese name, open, previous close, high,
+            # low, current price, ...
+            if len(fields) < 7 or not fields[6]:
+                return None
+            name = fields[1] or fields[0]
+            open_price, prev_close = fields[2], fields[3]
+            high, low, price = fields[4], fields[5], fields[6]
+        else:
+            # A share: name, open, previous close, current, high, low, ...
+            if len(fields) < 6 or not fields[3]:
+                return None
+            name = fields[0]
+            open_price, prev_close, price = fields[1], fields[2], fields[3]
+            high, low = fields[4], fields[5]
+        return Quote(
+            symbol=symbol,
+            name=name,
+            price=float(price),
+            open=float(open_price) if open_price else 0.0,
+            prev_close=float(prev_close) if prev_close else 0.0,
+            high=float(high) if high else 0.0,
+            low=float(low) if low else 0.0,
+            market=market,
+        )
+    except (ValueError, IndexError):
+        return None
+
+
 async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
     results: dict[str, Quote] = {}
     sina_codes = []
@@ -125,7 +183,9 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
         )
         resp.raise_for_status()
 
-    text = resp.text
+    # Sina does not consistently send a charset header.  Its payload is GBK;
+    # relying on httpx's default decoding turns Chinese names into mojibake.
+    text = resp.content.decode("gb18030", errors="replace")
     for sc in sina_codes:
         prefix = f'var hq_str_{sc}="'
         start = text.find(prefix)
@@ -135,21 +195,11 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
         end = text.find('"', start)
         if end == -1:
             continue
-        fields = text[start:end].split(",")
-        if len(fields) < 4 or not fields[3]:
-            continue
         sym = code_map[sc]
-        m = detect_market(sym)
-        results[sym] = Quote(
-            symbol=sym,
-            name=fields[0],
-            price=float(fields[3]),
-            open=float(fields[1]) if fields[1] else 0.0,
-            prev_close=float(fields[2]) if fields[2] else 0.0,
-            high=float(fields[4]) if fields[4] else 0.0,
-            low=float(fields[5]) if fields[5] else 0.0,
-            market=m,
-        )
+        fields = text[start:end].split(",")
+        quote = _parse_sina_fields(sym, fields)
+        if quote is not None:
+            results[sym] = quote
     return results
 
 
@@ -177,13 +227,13 @@ async def _fetch_us(symbols: list[str]) -> dict[str, Quote]:
 
 
 async def get_quote(symbol: str) -> Quote | None:
-    symbols = [symbol]
+    symbols = [normalize_symbol(symbol)]
     quotes = await get_quotes(symbols)
-    return quotes.get(symbol.upper())
+    return quotes.get(symbols[0])
 
 
 async def get_quotes(symbols: list[str]) -> dict[str, Quote]:
-    syms = [s.upper() for s in symbols]
+    syms = list(dict.fromkeys(normalize_symbol(s) for s in symbols))
     results: dict[str, Quote] = {}
     now = time.time()
 
@@ -232,6 +282,7 @@ async def get_quotes(symbols: list[str]) -> dict[str, Quote]:
 
 async def get_rate(currency: str) -> float:
     """Fetch exchange rate to CNY. Returns 1.0 for CNY."""
+    currency = currency.strip().upper()
     if currency == "CNY":
         return 1.0
 
@@ -247,9 +298,15 @@ async def get_rate(currency: str) -> float:
             )
             resp.raise_for_status()
             data = resp.json()
+            if data.get("result") != "success" or data.get("base_code") != currency:
+                raise ValueError(f"invalid exchange-rate response for {currency}")
             rate = float(data["rates"]["CNY"])
-    except Exception:
-        rate = cached[0] if cached else 1.0
+            if rate <= 0:
+                raise ValueError(f"invalid exchange rate for {currency}")
+    except Exception as exc:
+        if cached:
+            return cached[0]
+        raise RateUnavailableError(f"unable to fetch {currency}/CNY rate") from exc
     _rate_cache[currency] = (rate, now)
     return rate
 

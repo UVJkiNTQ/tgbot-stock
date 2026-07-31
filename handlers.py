@@ -91,7 +91,7 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
     change_pct = (change / q.prev_close * 100) if q.prev_close else 0.0
     sign = "+" if change >= 0 else ""
     market_label = {"A": "A股", "HK": "港股", "US": "美股", "FUND": "基金"}.get(q.market, q.market)
-    currency = quotes.market_currency(symbol)
+    currency = quotes.quote_currency(q)
 
     if q.market == "FUND":
         await message.reply(
@@ -117,11 +117,12 @@ def _parse_trade_args(args: str) -> tuple[str, float, int] | None:
     try:
         price = float(parts[1])
         qty = int(parts[2])
+        symbol = quotes.normalize_symbol(parts[0])
     except ValueError:
         return None
     if price <= 0 or qty <= 0:
         return None
-    return parts[0].upper(), price, qty
+    return symbol, price, qty
 
 
 @router.message(Command("buy"))
@@ -130,7 +131,11 @@ async def cmd_buy(
 ) -> None:
     parsed = _parse_trade_args(command.args)
     if parsed is None:
-        await message.reply("用法：/buy SYMBOL PRICE QTY\n示例：/buy 600000 10.50 100")
+        await message.reply(
+            "用法：/buy SYMBOL PRICE QTY\n"
+            "示例：/buy 600000 10.50 100\n"
+            "港股：/buy 01810 28.9 500"
+        )
         return
     symbol, price, qty = parsed
 
@@ -139,11 +144,16 @@ async def cmd_buy(
         await message.reply(f"未找到 {symbol} 的行情数据，无法记录买入")
         return
     name = q.name
+    symbol = q.symbol
     market_price = q.price
     deviation_pct = _price_deviation(price, market_price)
 
-    currency = quotes.market_currency(symbol)
-    rate = await quotes.get_rate(currency)
+    currency = quotes.quote_currency(q)
+    try:
+        rate = await quotes.get_rate(currency)
+    except quotes.RateUnavailableError:
+        await message.reply(f"暂时无法获取 {currency}/CNY 汇率，请稍后重试")
+        return
 
     total_orig = price * qty
     total_cny = total_orig * rate
@@ -193,6 +203,7 @@ async def cmd_sell(
         await message.reply(f"未找到 {symbol} 的行情数据，无法记录卖出")
         return
     name = q.name
+    symbol = q.symbol
 
     hold_map = await models.get_user_summary(message.from_user.id)
     holding = hold_map.get(symbol, 0)
@@ -206,15 +217,17 @@ async def cmd_sell(
         )
         return
 
-    currency = quotes.market_currency(symbol)
-    rate = await quotes.get_rate(currency)
+    currency = quotes.quote_currency(q)
+    try:
+        rate = await quotes.get_rate(currency)
+    except quotes.RateUnavailableError:
+        await message.reply(f"暂时无法获取 {currency}/CNY 汇率，请稍后重试")
+        return
     market_price = q.price
     deviation_pct = _price_deviation(price, market_price)
 
     trades = await models.get_trades(message.from_user.id, symbol)
-    total_buy_cost = sum(t.price * t.qty for t in trades if t.side == Side.BUY)
-    total_buy_qty = sum(t.qty for t in trades if t.side == Side.BUY)
-    avg_cost = total_buy_cost / total_buy_qty if total_buy_qty else 0.0
+    avg_cost, _avg_cost_cny = pnl.calculate_cost_basis(trades)
 
     total_orig = price * qty
     total_cny = total_orig * rate

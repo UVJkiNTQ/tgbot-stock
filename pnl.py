@@ -40,20 +40,36 @@ class UserPnl:
     total_cost_cny: float
 
 
-def _weighted_avg_cost_cny(trades: list[Trade]) -> float:
-    buy_trades = [t for t in trades if t.side == Side.BUY]
-    if not buy_trades:
-        return 0.0
-    total_cny = sum(t.price * t.qty * t.rate for t in buy_trades)
-    total_qty = sum(t.qty for t in buy_trades)
-    return total_cny / total_qty if total_qty else 0.0
+def calculate_cost_basis(trades: list[Trade]) -> tuple[float, float]:
+    """Return remaining average cost in original currency and CNY.
 
+    Sells remove shares at the running average cost.  This matters after a
+    complete exit and re-entry: historical buys must no longer affect the new
+    position's cost basis.
+    """
+    qty = 0
+    cost = 0.0
+    cost_cny = 0.0
+    for trade in trades:
+        if trade.side == Side.BUY:
+            qty += trade.qty
+            cost += trade.price * trade.qty
+            cost_cny += trade.price * trade.qty * trade.rate
+            continue
 
-def _weighted_avg_cost(trades: list[Trade]) -> float:
-    buy_trades = [t for t in trades if t.side == Side.BUY]
-    if not buy_trades:
-        return 0.0
-    return sum(t.price * t.qty for t in buy_trades) / sum(t.qty for t in buy_trades)
+        if qty <= 0:
+            continue
+        sold_qty = min(trade.qty, qty)
+        cost -= cost / qty * sold_qty
+        cost_cny -= cost_cny / qty * sold_qty
+        qty -= sold_qty
+        if qty == 0:
+            cost = 0.0
+            cost_cny = 0.0
+
+    if qty <= 0:
+        return 0.0, 0.0
+    return cost / qty, cost_cny / qty
 
 
 async def compute_user_pnl(user_id: int) -> UserPnl:
@@ -78,15 +94,14 @@ async def compute_user_pnl(user_id: int) -> UserPnl:
 
     for sym, net_qty in summary.items():
         trades = await models.get_trades(user_id, sym)
-        avg_cost = _weighted_avg_cost(trades)
-        avg_cost_cny = _weighted_avg_cost_cny(trades)
-        currency = trades[0].currency or quotes.market_currency(sym)
+        avg_cost, avg_cost_cny = calculate_cost_basis(trades)
+        currency = trades[-1].currency or quotes.market_currency(sym)
 
         if currency not in rate_map:
             rate_map[currency] = await quotes.get_rate(currency)
         cur_rate = rate_map[currency]
 
-        q = qmap.get(sym)
+        q = qmap.get(quotes.normalize_symbol(sym))
         name = q.name if q else sym
         cur_price = q.price if q else 0.0
 
