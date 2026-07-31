@@ -1,3 +1,5 @@
+import math
+
 from aiogram import F, Router, types
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -120,7 +122,7 @@ def _parse_trade_args(args: str) -> tuple[str, float, int] | None:
         symbol = quotes.normalize_symbol(parts[0])
     except ValueError:
         return None
-    if price <= 0 or qty <= 0:
+    if not math.isfinite(price) or price <= 0 or qty <= 0:
         return None
     return symbol, price, qty
 
@@ -382,7 +384,11 @@ def _position_lines(result: pnl.UserPnl) -> list[str]:
 
 @router.message(Command("position"))
 async def cmd_position(message: types.Message) -> None:
-    result = await pnl.compute_user_pnl(message.from_user.id)
+    try:
+        result = await pnl.compute_user_pnl(message.from_user.id)
+    except quotes.RateUnavailableError:
+        await message.reply("暂时无法获取外币汇率，请稍后重试")
+        return
     if not result.positions:
         await message.reply("你当前没有持仓")
         return
@@ -391,7 +397,11 @@ async def cmd_position(message: types.Message) -> None:
 
 @router.message(Command("pnl"))
 async def cmd_pnl(message: types.Message) -> None:
-    result = await pnl.compute_user_pnl(message.from_user.id)
+    try:
+        result = await pnl.compute_user_pnl(message.from_user.id)
+    except quotes.RateUnavailableError:
+        await message.reply("暂时无法获取外币汇率，请稍后重试")
+        return
     if not result.positions:
         await message.reply("你当前没有持仓，无法计算损益")
         return
@@ -426,7 +436,11 @@ async def cmd_pnl(message: types.Message) -> None:
 
 @router.message(Command("lb", "leaderboard"))
 async def cmd_leaderboard(message: types.Message) -> None:
-    board = await pnl.compute_leaderboard()
+    try:
+        board = await pnl.compute_leaderboard()
+    except quotes.RateUnavailableError:
+        await message.reply("暂时无法获取外币汇率，请稍后重试")
+        return
 
     if not board:
         await message.reply("还没有人有持仓，开搞吧！")

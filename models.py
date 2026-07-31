@@ -1,3 +1,5 @@
+import os
+
 import aiosqlite
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +29,8 @@ class Trade:
 
 
 async def init_db() -> None:
+    db_dir = os.path.dirname(os.path.abspath(config.DB_PATH))
+    os.makedirs(db_dir, exist_ok=True)
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(
             """CREATE TABLE IF NOT EXISTS trades (

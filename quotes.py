@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -37,7 +38,7 @@ def normalize_symbol(symbol: str) -> str:
     if not s:
         raise ValueError("symbol cannot be empty")
 
-    if s.endswith(".HK"):
+    if s.endswith(".HK") and s[:-3].isdigit():
         s = s[:-3]
     elif s.startswith("HK") and s[2:].isdigit():
         s = s[2:]
@@ -177,11 +178,14 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
         return results
 
     url = f"https://hq.sinajs.cn/list={','.join(sina_codes)}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            url, headers={"Referer": "https://finance.sina.com.cn"}
-        )
-        resp.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                url, headers={"Referer": "https://finance.sina.com.cn"}
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return results
 
     # Sina does not consistently send a charset header.  Its payload is GBK;
     # relying on httpx's default decoding turns Chinese names into mojibake.
@@ -204,14 +208,19 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
 
 
 async def _fetch_us(symbols: list[str]) -> dict[str, Quote]:
-    results: dict[str, Quote] = {}
-    for sym in symbols:
+    def fetch_one(sym: str) -> Quote | None:
         try:
             ticker = yf.Ticker(sym)
             info = ticker.fast_info
-            price = info.get("lastPrice") or info.get("regularMarketPrice") or 0.0
-            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose") or 0.0
-            results[sym] = Quote(
+            price = (
+                info.get("lastPrice") or info.get("regularMarketPrice") or 0.0
+            )
+            prev_close = (
+                info.get("previousClose")
+                or info.get("regularMarketPreviousClose")
+                or 0.0
+            )
+            return Quote(
                 symbol=sym,
                 name=ticker.ticker,
                 price=float(price),
@@ -222,7 +231,15 @@ async def _fetch_us(symbols: list[str]) -> dict[str, Quote]:
                 market="US",
             )
         except Exception:
-            continue
+            return None
+
+    results: dict[str, Quote] = {}
+    fetched = await asyncio.gather(
+        *(asyncio.to_thread(fetch_one, sym) for sym in symbols)
+    )
+    for sym, quote in zip(symbols, fetched):
+        if quote is not None:
+            results[sym] = quote
     return results
 
 
