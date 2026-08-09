@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 
@@ -38,7 +39,16 @@ def normalize_symbol(symbol: str) -> str:
     if not s:
         raise ValueError("symbol cannot be empty")
 
-    if s.endswith(".HK") and s[:-3].isdigit():
+    # Optional market qualifier suffixes let users force a market when a code
+    # is ambiguous (e.g. a fund vs a stock). They are stripped here so the
+    # canonical symbol stored in the database stays clean.
+    if s.endswith(".F"):
+        s = s[:-2]
+    elif s.endswith(".A"):
+        s = s[:-2]
+    elif s.endswith(".US"):
+        s = s[:-3]
+    elif s.endswith(".HK") and s[:-3].isdigit():
         s = s[:-3]
     elif s.startswith("HK") and s[2:].isdigit():
         s = s[2:]
@@ -48,6 +58,35 @@ def normalize_symbol(symbol: str) -> str:
     if s.isdigit() and len(s) <= 5:
         return s.zfill(5)
     return s
+
+
+def parse_symbol(symbol: str) -> tuple[str, str | None]:
+    """Return (canonical_symbol, forced_market_or_None).
+
+    A trailing qualifier ('.F', '.A', '.US', '.HK') forces the market instead
+    of relying on heuristic detection, letting users disambiguate codes that
+    could be both a stock and a fund.
+    """
+    s = symbol.strip().upper()
+    if not s:
+        raise ValueError("symbol cannot be empty")
+    forced: str | None = None
+    if s.endswith(".F"):
+        forced = "FUND"
+        s = s[:-2]
+    elif s.endswith(".A"):
+        forced = "A"
+        s = s[:-2]
+    elif s.endswith(".US"):
+        forced = "US"
+        s = s[:-3]
+    elif s.endswith(".HK") and s[:-3].isdigit():
+        forced = "HK"
+        s = s[:-3]
+    if forced == "FUND":
+        # Funds are six-digit; do not apply the five-digit HK zero-padding.
+        return s, forced
+    return normalize_symbol(s), forced
 
 
 def detect_market(symbol: str) -> str:
@@ -85,43 +124,42 @@ def _sina_list(symbol: str) -> str:
 
 
 async def _fetch_funds(symbols: list[str]) -> dict[str, Quote]:
+    """Fetch fund NAV from Eastmoney's pingzhongdata (unit net value history)."""
     results: dict[str, Quote] = {}
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(
+        timeout=10, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com"}
+    ) as client:
         for sym in symbols:
             try:
                 resp = await client.get(
-                    f"https://fundgz.1234567.com.cn/js/{sym}.js",
-                    headers={"Referer": "https://fund.eastmoney.com"},
+                    f"https://fund.eastmoney.com/pingzhongdata/{sym}.js"
                 )
                 resp.raise_for_status()
-                raw = resp.content
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = raw.decode("gbk", errors="replace")
-                prefix = "jsonpgz("
-                start = text.find(prefix)
-                if start == -1:
+                text = resp.content.decode("utf-8", errors="replace")
+
+                name_m = re.search(r'fS_name\s*=\s*"([^"]*)"', text)
+                trend_m = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text)
+                if not name_m or not trend_m:
                     continue
-                start += len(prefix)
-                end = text.rfind(")")
-                if end == -1:
+                name = name_m.group(1).strip()
+                trend = json.loads(trend_m.group(1))
+                if not trend:
                     continue
-                data = json.loads(text[start:end])
-                name = data.get("name", "")
-                gsz = float(data.get("gsz", 0) or 0)
-                dwjz = float(data.get("dwjz", 0) or 0)
-                gztime = data.get("gztime", "")
-                if not name or gsz <= 0:
+
+                last = trend[-1]
+                prev = trend[-2] if len(trend) >= 2 else last
+                price = float(last.get("y") or 0)
+                prev_close = float(prev.get("y") or 0)
+                if not name or price <= 0:
                     continue
                 results[sym] = Quote(
                     symbol=sym,
                     name=name,
-                    price=gsz,
-                    open=dwjz,
-                    prev_close=dwjz,
-                    high=gsz,
-                    low=gsz,
+                    price=price,
+                    open=prev_close,
+                    prev_close=prev_close,
+                    high=max(price, prev_close),
+                    low=min(price, prev_close),
                     market="FUND",
                 )
             except Exception:
@@ -244,29 +282,33 @@ async def _fetch_us(symbols: list[str]) -> dict[str, Quote]:
 
 
 async def get_quote(symbol: str) -> Quote | None:
-    symbols = [normalize_symbol(symbol)]
-    quotes = await get_quotes(symbols)
-    return quotes.get(symbols[0])
+    base, _ = parse_symbol(symbol)
+    quotes = await get_quotes([symbol])
+    return quotes.get(base)
 
 
 async def get_quotes(symbols: list[str]) -> dict[str, Quote]:
-    syms = list(dict.fromkeys(normalize_symbol(s) for s in symbols))
     results: dict[str, Quote] = {}
     now = time.time()
 
     sina_syms: list[str] = []
     us_syms: list[str] = []
+    fund_syms: list[str] = []
 
-    for sym in syms:
-        cached = _quote_cache.get(sym)
+    for sym in symbols:
+        base, forced = parse_symbol(sym)
+        cached = _quote_cache.get(base)
         if cached and now - cached[1] < config.QUOTE_CACHE_TTL:
-            results[sym] = cached[0]
+            results[base] = cached[0]
             continue
-        m = detect_market(sym)
+        if forced == "FUND":
+            fund_syms.append(base)
+            continue
+        m = detect_market(base)
         if m == "US":
-            us_syms.append(sym)
+            us_syms.append(base)
         else:
-            sina_syms.append(sym)
+            sina_syms.append(base)
 
     missed_a_syms: list[str] = []
 
@@ -280,8 +322,8 @@ async def get_quotes(symbols: list[str]) -> dict[str, Quote]:
             if sym not in sina_results and detect_market(sym) == "A":
                 missed_a_syms.append(sym)
 
-    if missed_a_syms:
-        fund_results = await _fetch_funds(missed_a_syms)
+    if missed_a_syms or fund_syms:
+        fund_results = await _fetch_funds(list(dict.fromkeys(missed_a_syms + fund_syms)))
         now2 = time.time()
         for sym, q in fund_results.items():
             _quote_cache[sym] = (q, now2)

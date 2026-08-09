@@ -70,7 +70,11 @@ HELP_TEXT = """股票持仓 Bot 命令：
 /del ID — 删除一笔交易记录（不带ID可查看列表）
 
 SYMBOL 示例：600000(A股) 00700(港股) AAPL(美股)
-ETF 也支持：510050 159919 02800"""
+ETF 也支持：510050 159919 02800
+
+代码冲突时强制指定类型（加后缀）：
+· 010042.F — 场外基金
+· 600000.A — A股  ·  00700.HK — 港股  ·  AAPL.US — 美股"""
 
 
 @router.message(Command("start", "help"))
@@ -119,7 +123,7 @@ def _parse_trade_args(args: str) -> tuple[str, float, int] | None:
     try:
         price = float(parts[1])
         qty = int(parts[2])
-        symbol = quotes.normalize_symbol(parts[0])
+        symbol = parts[0].upper()
     except ValueError:
         return None
     if not math.isfinite(price) or price <= 0 or qty <= 0:
