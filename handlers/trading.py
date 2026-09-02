@@ -1,4 +1,8 @@
+import logging
+from decimal import Decimal
+
 from aiogram import Router, types
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 
@@ -7,6 +11,7 @@ import quotes
 from .common import (
     PRICE_DEVIATION_PCT,
     TradeConfirm,
+    calculate_amount_qty,
     confirm_keyboard,
     format_leverage,
     format_money,
@@ -20,6 +25,7 @@ from models import PositionEntry, Side
 
 
 router = Router(name="trade_commands")
+logger = logging.getLogger(__name__)
 
 
 def _is_closed_by(entry: PositionEntry, side: Side) -> bool:
@@ -36,6 +42,42 @@ def _close_entries_text(entries: list[PositionEntry]) -> str:
             f"{format_leverage(entry.leverage)} {action}{format_qty(abs(entry.qty))}股"
         )
     return "、".join(parts)
+
+
+async def _invalidate_previous_confirmation(
+    message: types.Message, state: FSMContext
+) -> None:
+    """Best-effort invalidate the previous confirmation message in this chat."""
+    get_data = getattr(state, "get_data", None)
+    if get_data is None:
+        return
+    data = await get_data()
+    previous_message_id = data.get("confirmation_message_id")
+    if type(previous_message_id) is not int:
+        return
+
+    bot = getattr(message, "bot", None)
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if bot is None or type(chat_id) is not int:
+        return
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=previous_message_id,
+            text="该确认已失效：你已发起新的交易，请使用最新确认按钮。",
+            reply_markup=None,
+        )
+    except TelegramAPIError:
+        # The old message may already be edited/deleted, or Telegram may be
+        # temporarily unavailable.  The callback message-id check remains the
+        # authoritative protection against executing stale parameters.
+        logger.debug(
+            "unable to invalidate previous confirmation message %s",
+            previous_message_id,
+            exc_info=True,
+        )
 
 
 def _trade_usage(side: Side) -> str:
@@ -57,7 +99,7 @@ def _amount_trade_usage(side: Side) -> str:
     return (
         f"用法：/{command} SYMBOL PRICE AMOUNT [Nx] [Ns]\n"
         f"示例：/{command} 600000 10.50 10000 5x 100s\n"
-        f"按不超过仓位金额计算最大可{action}量；"
+        f"按不超过人民币预算计算最大可{action}量（AMOUNT 为人民币）；"
         "100s、1s、01s、001s 分别表示最小 100、1、0.1、0.01 股"
     )
 
@@ -83,6 +125,7 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
         "HK": "港股",
         "US": "美股",
         "FUND": "基金",
+        "BSE": "北交所",
     }.get(quote.market, quote.market)
     currency = quotes.quote_currency(quote)
 
@@ -121,9 +164,13 @@ async def _cmd_trade_parsed(
     state: FSMContext,
     side: Side,
     parsed: tuple[str, float, int | str, float | None],
+    quote: quotes.Quote | None = None,
+    rate: float | None = None,
+    amount_cny: Decimal | None = None,
 ) -> None:
     symbol, price, requested_qty, requested_leverage = parsed
-    quote = await quotes.get_quote(symbol)
+    if quote is None:
+        quote = await quotes.get_quote(symbol)
     action = "买入" if side == Side.BUY else "卖出"
     if quote is None or not quote.price:
         await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
@@ -189,15 +236,18 @@ async def _cmd_trade_parsed(
             )
 
     currency = quotes.quote_currency(quote)
-    try:
-        rate = await quotes.get_rate(currency)
-    except quotes.RateUnavailableError:
-        await message.reply(f"暂时无法获取 {currency}/CNY 汇率，请稍后重试")
-        return
+    if rate is None:
+        try:
+            rate = await quotes.get_rate(currency)
+        except quotes.RateUnavailableError:
+            await message.reply(f"暂时无法获取 {currency}/CNY 汇率，请稍后重试")
+            return
 
     total_orig = price * qty / models.QTY_SCALE
     total_cny = total_orig * rate
     username = message.from_user.username or message.from_user.full_name
+    await _invalidate_previous_confirmation(message, state)
+    await state.update_data(confirmation_message_id=None)
     await state.set_state(
         TradeConfirm.buying if side == Side.BUY else TradeConfirm.selling
     )
@@ -225,6 +275,9 @@ async def _cmd_trade_parsed(
     rate_line = ""
     if currency != "CNY":
         rate_line = f"\n汇率 {currency}/CNY: {rate:.4f}  (≈¥{total_cny:,.2f})"
+    budget_line = ""
+    if amount_cny is not None:
+        budget_line = f"\n预算（人民币）：¥{amount_cny:,.2f}"
     warn_line = ""
     if deviation_pct > PRICE_DEVIATION_PCT:
         warn_line = (
@@ -232,13 +285,17 @@ async def _cmd_trade_parsed(
             f"{deviation_pct:.1f}%"
         )
 
-    await message.reply(
+    confirmation_message = await message.reply(
         f"确认{action}：{name} ({symbol})\n"
         f"{format_qty(qty)}股 @ {format_money(price, currency)}"
         f" = {format_money(total_orig, currency)}"
-        f"{leverage_line}{position_line}{new_entry_notice}{rate_line}{warn_line}",
+        f"{leverage_line}{position_line}{new_entry_notice}"
+        f"{rate_line}{budget_line}{warn_line}",
         reply_markup=confirm_keyboard(side.value.lower(), message.from_user.id),
     )
+    confirmation_message_id = getattr(confirmation_message, "message_id", None)
+    if type(confirmation_message_id) is int:
+        await state.update_data(confirmation_message_id=confirmation_message_id)
 
 
 async def _cmd_amount_trade(
@@ -252,11 +309,38 @@ async def _cmd_amount_trade(
         await message.reply(_amount_trade_usage(side))
         return
 
-    symbol, price, amount, qty, min_unit, leverage = parsed
-    if qty == 0:
+    symbol, price, amount, _qty, min_unit, leverage = parsed
+
+    # CNY assets have a fixed 1:1 rate, so retain the fast rejection path for
+    # an unaffordable order. Foreign assets must fetch their quote/rate first:
+    # the same CNY budget buys a different quantity in HKD/USD.
+    if _qty == 0 and quotes.market_currency(symbol) == "CNY":
         action = "买入" if side == Side.BUY else "卖出"
         await message.reply(
-            f"仓位 {amount:g} 不足：按现价 {price:g}、"
+            f"人民币预算 ¥{amount:,.2f} 不足：按现价 {price:g}、"
+            f"最小单位 {format_qty(min_unit)} 股，无法{action} {symbol}"
+        )
+        return
+
+    quote = await quotes.get_quote(symbol)
+    action = "买入" if side == Side.BUY else "卖出"
+    if quote is None or not quote.price:
+        await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
+        return
+
+    currency = quotes.quote_currency(quote)
+    try:
+        rate = await quotes.get_rate(currency)
+    except quotes.RateUnavailableError:
+        await message.reply(f"暂时无法获取 {currency}/CNY 汇率，请稍后重试")
+        return
+
+    qty = calculate_amount_qty(
+        amount, Decimal(str(price)), min_unit, rate
+    )
+    if qty == 0:
+        await message.reply(
+            f"人民币预算 ¥{amount:,.2f} 不足：按现价 {price:g} {currency}、"
             f"最小单位 {format_qty(min_unit)} 股，无法{action} {symbol}"
         )
         return
@@ -266,6 +350,9 @@ async def _cmd_amount_trade(
         state,
         side,
         (symbol, price, qty, leverage),
+        quote=quote,
+        rate=rate,
+        amount_cny=amount,
     )
 
 
@@ -337,6 +424,8 @@ async def cmd_close(
     total_cny = total_orig * rate
 
     username = message.from_user.username or message.from_user.full_name
+    await _invalidate_previous_confirmation(message, state)
+    await state.update_data(confirmation_message_id=None)
     await state.set_state(TradeConfirm.closing)
     await state.update_data(
         user_id=message.from_user.id,
@@ -363,10 +452,13 @@ async def cmd_close(
             f"{deviation_pct:.1f}%"
         )
 
-    await message.reply(
+    confirmation_message = await message.reply(
         f"确认一次平仓：{name} ({symbol})\n"
         f"将关闭 {len(entries)} 个条目：{_close_entries_text(entries)}\n"
         f"合计 {format_qty(qty)} 股 @ {format_money(price, currency)}"
         f" = {format_money(total_orig, currency)}{rate_line}{warn_line}",
         reply_markup=confirm_keyboard("close", message.from_user.id),
     )
+    confirmation_message_id = getattr(confirmation_message, "message_id", None)
+    if type(confirmation_message_id) is int:
+        await state.update_data(confirmation_message_id=confirmation_message_id)

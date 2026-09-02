@@ -1,3 +1,6 @@
+import asyncio
+from functools import wraps
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
@@ -15,6 +18,26 @@ from models import Side
 
 
 router = Router(name="trade_callbacks")
+_confirmation_locks: dict[int, asyncio.Lock] = {}
+
+
+def _confirmation_lock(user_id: int) -> asyncio.Lock:
+    """Serialize state-consuming callbacks for one user.
+
+    FSM ``get_data`` and ``clear`` are separate operations.  Without a lock,
+    two fast callback updates can both read the same confirmation snapshot
+    before either one clears it.
+    """
+    return _confirmation_locks.setdefault(user_id, asyncio.Lock())
+
+
+def serialized_confirmation(handler):
+    @wraps(handler)
+    async def wrapped(callback: CallbackQuery, state: FSMContext) -> None:
+        async with _confirmation_lock(callback.from_user.id):
+            await handler(callback, state)
+
+    return wrapped
 
 
 async def insert_confirmed_trades(
@@ -63,6 +86,7 @@ def _confirmed_trade_lines(trades: list[models.Trade]) -> str:
 
 
 @router.callback_query(F.data.startswith("buy_ok"))
+@serialized_confirmation
 async def on_buy_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     if not await verify_confirm_owner(callback, data):
@@ -101,6 +125,7 @@ async def on_buy_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("sell_ok"))
+@serialized_confirmation
 async def on_sell_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     if not await verify_confirm_owner(callback, data):
@@ -139,6 +164,7 @@ async def on_sell_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("close_ok"))
+@serialized_confirmation
 async def on_close_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     if not await verify_confirm_owner(callback, data):
@@ -168,6 +194,7 @@ async def on_close_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("cancel"))
+@serialized_confirmation
 async def on_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     if not await verify_confirm_owner(callback):
         return

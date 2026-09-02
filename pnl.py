@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 
 import models
@@ -12,20 +13,21 @@ class Position:
     name: str
     qty: int  # signed integer hundredth-share units
     avg_cost: float
-    current_price: float
+    current_price: float | None
     currency: str
-    rate: float  # current rate to CNY
+    rate: float | None  # current rate to CNY
     leverage: float = 1.0
 
-    market_value: float = 0.0
+    market_value: float | None = None
     unrealized_pnl: float = 0.0
     unrealized_pnl_pct: float = 0.0
 
     avg_cost_cny: float = 0.0
-    current_price_cny: float = 0.0
-    market_value_cny: float = 0.0
+    current_price_cny: float | None = None
+    market_value_cny: float | None = None
     cost_cny: float = 0.0
     unrealized_pnl_cny: float = 0.0
+    quote_available: bool = True
 
     @property
     def is_foreign(self) -> bool:
@@ -236,13 +238,33 @@ async def compute_user_pnl(
         avg_cost_cny = history.avg_cost_cny
         currency = history.currency or quotes.market_currency(sym, market)
 
+        q = qmap.get((quotes.normalize_symbol(sym), market))
+        if q is None or not math.isfinite(q.price) or q.price <= 0:
+            # A missing quote is not a zero-price quote. Keep the position
+            # visible, but leave it out of all live valuation aggregates so a
+            # provider outage cannot turn it into a leveraged -100% loss.
+            cost_cny = abs(net_qty) * avg_cost_cny / models.QTY_SCALE
+            positions.append(Position(
+                symbol=sym,
+                market=market,
+                name=sym,
+                qty=net_qty,
+                avg_cost=avg_cost,
+                current_price=None,
+                currency=currency,
+                rate=None,
+                leverage=history.leverage,
+                quote_available=False,
+                cost_cny=cost_cny,
+            ))
+            continue
+
         if currency not in rate_map:
             rate_map[currency] = await quotes.get_rate(currency)
         cur_rate = rate_map[currency]
 
-        q = qmap.get((quotes.normalize_symbol(sym), market))
-        name = q.name if q else sym
-        cur_price = q.price if q else 0.0
+        name = q.name
+        cur_price = q.price
 
         cur_price_cny = cur_price * cur_rate
         mv = net_qty * cur_price / models.QTY_SCALE

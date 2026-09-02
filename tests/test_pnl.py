@@ -235,6 +235,28 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HistoricalUserPnlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_quote_is_not_counted_as_a_leveraged_loss(self) -> None:
+        trades = [trade(Side.BUY, 10, 100, leverage=5)]
+        with (
+            patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
+            patch.object(
+                pnl.quotes, "get_quotes", AsyncMock(return_value={})
+            ),
+            patch.object(pnl.quotes, "get_rate", AsyncMock()) as get_rate,
+        ):
+            result = await pnl.compute_user_pnl(1)
+
+        self.assertEqual(len(result.positions), 1)
+        position = result.positions[0]
+        self.assertFalse(position.quote_available)
+        self.assertIsNone(position.current_price)
+        self.assertEqual(position.unrealized_pnl, 0.0)
+        self.assertEqual(position.unrealized_pnl_pct, 0.0)
+        self.assertEqual(result.total_unrealized_pnl_cny, 0.0)
+        self.assertEqual(result.total_market_value_cny, 0.0)
+        self.assertEqual(result.total_cost_cny, 0.0)
+        get_rate.assert_not_awaited()
+
     async def test_closed_position_is_reported_without_live_quote_lookup(self) -> None:
         trades = [
             trade(Side.BUY, 10, 100, leverage=2),

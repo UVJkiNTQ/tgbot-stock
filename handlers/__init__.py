@@ -15,6 +15,7 @@ from .reports import (
     cmd_pnl,
     cmd_position,
     cmd_trades,
+    format_trade_time,
     position_lines,
     router as reports_router,
     trade_lines,

@@ -139,6 +139,45 @@ class BuyHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("500股 @ HKD 28.9000", reply)
         self.assertNotIn("委托价偏离", reply)
 
+    async def test_hong_kong_amount_uses_cny_budget_and_hkd_rate(self) -> None:
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(
+                id=123, username="tester", full_name="Test User"
+            ),
+            reply=AsyncMock(),
+        )
+        command = SimpleNamespace(args="01810 28.9 500")
+        state = SimpleNamespace(set_state=AsyncMock(), update_data=AsyncMock())
+        quote = Quote(
+            symbol="01810",
+            name="小米集团－Ｗ",
+            price=28.9,
+            open=29.3,
+            prev_close=31.04,
+            high=29.5,
+            low=27.76,
+            market="HK",
+        )
+
+        with (
+            patch.object(
+                handlers.quotes, "get_quote", AsyncMock(return_value=quote)
+            ),
+            patch.object(
+                handlers.quotes, "get_rate", AsyncMock(return_value=0.862692)
+            ),
+            patch.object(
+                handlers.models, "get_position_entries", AsyncMock(return_value=[])
+            ),
+        ):
+            await handlers.cmd_buya(message, command, state)
+
+        saved = state.update_data.await_args.kwargs
+        self.assertEqual(saved["qty"], 2005)  # 20.05 HKD shares within ¥500
+        reply = message.reply.await_args.args[0]
+        self.assertIn("20.05股", reply)
+        self.assertIn("预算（人民币）：¥500.00", reply)
+
     async def test_different_leverage_warns_about_new_position_entry(self) -> None:
         message = SimpleNamespace(
             from_user=SimpleNamespace(
@@ -280,11 +319,38 @@ class CloseHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TradeInputTests(unittest.TestCase):
+    def test_trade_lines_converts_utc_to_beijing_time(self) -> None:
+        trade = models.Trade(
+            id=1,
+            user_id=123,
+            username="tester",
+            symbol="600000",
+            side=models.Side.BUY,
+            price=10.0,
+            qty=100,
+            currency="CNY",
+            rate=1.0,
+            trade_ts="2026-09-02T20:00:00+00:00",
+            leverage=1.0,
+            market="A",
+        )
+
+        rendered = handlers.trade_lines([trade])
+
+        self.assertIn("2026-09-03 04:00:00", rendered)
+        self.assertNotIn("2026-09-02", rendered)
+
     def test_compact_minimum_units_map_to_share_precision(self) -> None:
         self.assertEqual(_parse_min_unit("100s"), 10000)
         self.assertEqual(_parse_min_unit("1s"), 100)
         self.assertEqual(_parse_min_unit("01s"), 10)
         self.assertEqual(_parse_min_unit("001s"), 1)
+
+    def test_beijing_exchange_qualifier_is_preserved(self) -> None:
+        parsed = _parse_trade_args("920118.BSE 10 1")
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed[0], "920118.BSE")
 
     def test_amount_trade_floors_to_lot_without_exceeding_amount(self) -> None:
         parsed = _parse_amount_trade_args("600000 28.9 10000 100s 5x")
@@ -297,6 +363,12 @@ class TradeInputTests(unittest.TestCase):
         self.assertEqual(min_unit, 10000)
         self.assertEqual(leverage, 5.0)
         self.assertLessEqual(price * (qty / models.QTY_SCALE), float(amount))
+
+    def test_amount_trade_converts_cny_budget_to_quote_currency(self) -> None:
+        parsed = _parse_amount_trade_args("01810 28.9 500", rate=0.862692)
+        self.assertIsNotNone(parsed)
+        _symbol, _price, _amount, qty, _min_unit, _leverage = parsed
+        self.assertEqual(qty, 2005)
 
     def test_amount_trade_accepts_options_in_either_order(self) -> None:
         first = _parse_amount_trade_args("600000 3 1 2x 01s")

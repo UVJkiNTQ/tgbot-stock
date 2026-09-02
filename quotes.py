@@ -10,6 +10,7 @@ import yfinance as yf  # type: ignore
 import config
 from instrument import (
     detect_market,
+    market_candidates,
     normalize_symbol,
     parse_symbol,
     resolve_instrument,
@@ -25,10 +26,12 @@ class Quote:
     prev_close: float
     high: float
     low: float
-    market: str  # "A", "HK", "US", "FUND"
+    market: str  # "A", "HK", "US", "FUND", "BSE"
 
 
-MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD", "FUND": "CNY"}
+MARKET_CURRENCY = {
+    "A": "CNY", "HK": "HKD", "US": "USD", "FUND": "CNY", "BSE": "CNY"
+}
 
 InstrumentKey = tuple[str, str]
 
@@ -57,6 +60,8 @@ def _sina_list(symbol: str, market: str | None = None) -> str:
     _, m = resolve_instrument(s, market)
     if m == "HK":
         return f"hk{s.zfill(5)}"
+    if m == "BSE":
+        return f"bj{s.zfill(6)}"
     if m == "A":
         if s[0] in ("5", "6", "9"):
             return f"sh{s}"
@@ -242,6 +247,7 @@ async def get_quotes(
     hk_syms: list[str] = []
     us_syms: list[str] = []
     fund_syms: list[str] = []
+    bse_syms: list[str] = []
 
     keys = list(
         dict.fromkeys(
@@ -259,6 +265,8 @@ async def get_quotes(
             continue
         if market == "FUND":
             fund_syms.append(base)
+        elif market == "BSE":
+            bse_syms.append(base)
         elif market == "US":
             us_syms.append(base)
         elif market == "HK":
@@ -268,7 +276,11 @@ async def get_quotes(
 
     missed_a_syms: list[str] = []
 
-    for market, symbols in (("A", a_syms), ("HK", hk_syms)):
+    for market, symbols in (
+        ("A", a_syms),
+        ("HK", hk_syms),
+        ("BSE", bse_syms),
+    ):
         if not symbols:
             continue
         sina_results = await _fetch_sina(symbols, market)

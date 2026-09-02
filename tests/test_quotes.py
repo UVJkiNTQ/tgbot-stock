@@ -13,6 +13,24 @@ class SymbolTests(unittest.TestCase):
                 self.assertEqual(quotes.detect_market(raw), "HK")
                 self.assertEqual(quotes.market_currency(raw), "HKD")
 
+    def test_unambiguous_otc_fund_codes_are_detected(self) -> None:
+        self.assertEqual(quotes.normalize_symbol("010042"), "010042")
+        self.assertEqual(quotes.detect_market("010042"), "FUND")
+        self.assertEqual(quotes.market_candidates("010042"), frozenset({"FUND"}))
+        self.assertEqual(quotes.market_currency("010042"), "CNY")
+
+    def test_shared_code_segments_are_exposed_as_ambiguous(self) -> None:
+        self.assertEqual(
+            quotes.market_candidates("002714"), frozenset({"A", "FUND"})
+        )
+        self.assertEqual(quotes.detect_market("002714"), "A")
+
+    def test_beijing_exchange_code_segments_are_detected(self) -> None:
+        for raw in ("430047", "830799", "871970", "920118", "BJ920118", "920118.BJ"):
+            with self.subTest(raw=raw):
+                self.assertEqual(quotes.detect_market(raw), "BSE")
+                self.assertEqual(quotes.market_candidates(raw), frozenset({"BSE"}))
+
     def test_us_ticker_hkd_remains_us_ticker(self) -> None:
         self.assertEqual(quotes.normalize_symbol("HKD"), "HKD")
         self.assertEqual(quotes.detect_market("HKD"), "US")
@@ -34,6 +52,10 @@ class SinaParserTests(unittest.TestCase):
         self.assertEqual(quote.prev_close, 471.8)
         self.assertEqual(quote.price, 475.2)
         self.assertEqual(quotes.quote_currency(quote), "HKD")
+
+    def test_beijing_exchange_uses_sina_bj_code(self) -> None:
+        self.assertEqual(quotes._sina_list("920118"), "bj920118")
+        self.assertEqual(quotes._sina_list("920118.BSE"), "bj920118")
 
     def test_a_share_layout_is_unchanged(self) -> None:
         fields = ["浦发银行", "9.590", "9.710", "9.390", "9.590", "9.280"]

@@ -49,6 +49,20 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(summary, {"600000.A": -q(60)})
 
+    async def test_beijing_exchange_market_is_stored_as_a_separate_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                trade = await models.insert_trade(
+                    1, "tester", "920118", models.Side.BUY,
+                    10.0, q(1), "CNY", 1.0,
+                )
+                summary = await models.get_user_summary(1)
+
+            self.assertEqual(trade.market, "BSE")
+            self.assertEqual(summary, {"920118.BSE": q(1)})
+
     async def test_fresh_database_stores_integer_hundredth_share_units(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "trades.db")
@@ -135,8 +149,8 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(after, {"600000.A": 30025})
             self.assertFalse(second.updated)
-            self.assertEqual(version, 1)
-            self.assertEqual(models.DB_SCHEMA_VERSION, 1)
+            self.assertEqual(version, models.DB_SCHEMA_VERSION)
+            self.assertEqual(models.DB_SCHEMA_VERSION, 2)
 
     async def test_init_backfills_market_in_prerelease_v1_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -180,6 +194,90 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
                 entries,
                 [models.PositionEntry("002714", 1.0, -20000, "A")],
             )
+
+    async def test_legacy_otc_fund_is_not_migrated_into_a_share_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute(
+                    """CREATE TABLE trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
+                        price REAL NOT NULL,
+                        qty INTEGER NOT NULL,
+                        currency TEXT NOT NULL DEFAULT 'CNY',
+                        rate REAL NOT NULL DEFAULT 1.0,
+                        trade_ts TEXT NOT NULL
+                    )"""
+                )
+                await db.execute(
+                    "INSERT INTO trades "
+                    "(user_id, username, symbol, side, price, qty, trade_ts) "
+                    "VALUES (1, 'tester', '010042', 'BUY', 1.2, 20, '2026-01-01')"
+                )
+                await db.commit()
+
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                before = await models.get_user_summary(1)
+                result = await models.update_database()
+                after = await models.get_user_summary(1)
+
+            async with aiosqlite.connect(db_path) as db:
+                stored = await (
+                    await db.execute("SELECT qty, market FROM trades")
+                ).fetchone()
+
+            self.assertEqual(before, {"010042.F": 2000})
+            self.assertEqual(after, {"010042.F": 2000})
+            self.assertEqual(stored, (2000, "FUND"))
+            self.assertTrue(result.updated)
+            self.assertEqual(result.market_rows_updated, 0)
+
+    async def test_update_repairs_previously_mislabeled_otc_fund(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute(
+                    """CREATE TABLE trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
+                        price REAL NOT NULL,
+                        qty INTEGER NOT NULL,
+                        leverage REAL NOT NULL DEFAULT 1.0,
+                        currency TEXT NOT NULL DEFAULT 'CNY',
+                        rate REAL NOT NULL DEFAULT 1.0,
+                        market TEXT,
+                        trade_ts TEXT NOT NULL
+                    )"""
+                )
+                await db.execute(
+                    "INSERT INTO trades "
+                    "(user_id, username, symbol, side, price, qty, market, trade_ts) "
+                    "VALUES (1, 'tester', '010042', 'BUY', 1.2, 2000, 'A', '2026-01-01')"
+                )
+                await db.execute("PRAGMA user_version = 1")
+                await db.commit()
+
+            with patch.object(models.config, "DB_PATH", db_path):
+                result = await models.update_database()
+
+            async with aiosqlite.connect(db_path) as db:
+                stored = await (
+                    await db.execute("SELECT qty, market FROM trades")
+                ).fetchone()
+
+            self.assertTrue(result.updated)
+            self.assertEqual(result.old_version, 1)
+            self.assertEqual(result.new_version, models.DB_SCHEMA_VERSION)
+            self.assertEqual(result.market_rows_updated, 1)
+            self.assertEqual(stored, (2000, "FUND"))
 
     async def test_fractional_short_and_close_remain_exact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

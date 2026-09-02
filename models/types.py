@@ -50,6 +50,7 @@ class DatabaseUpdateResult:
     rows_updated: int
     old_version: int
     new_version: int
+    market_rows_updated: int = 0
 
 
 class DatabaseUpdateError(RuntimeError):

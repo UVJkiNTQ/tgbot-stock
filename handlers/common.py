@@ -98,13 +98,33 @@ def parse_min_unit(raw: str) -> int:
     return models.quantity_to_units(value)
 
 
+def calculate_amount_qty(
+    amount_cny: Decimal,
+    price: Decimal,
+    min_unit: int,
+    rate: Decimal | float = 1.0,
+) -> int:
+    """Calculate quantity from a CNY budget and a quote-currency price."""
+    rate_decimal = Decimal(str(rate))
+    if not rate_decimal.is_finite() or rate_decimal <= 0:
+        raise ValueError("invalid exchange rate")
+
+    unit_cost_cny = (
+        price * models.units_to_quantity(min_unit) * rate_decimal
+    )
+    lots = (amount_cny / unit_cost_cny).to_integral_value(rounding=ROUND_FLOOR)
+    return int(lots) * min_unit
+
+
 def parse_amount_trade_args(
     args: str,
+    rate: Decimal | float = 1.0,
 ) -> tuple[str, float, Decimal, int, int, float | None] | None:
     """Parse an amount-sized trade and calculate its affordable quantity.
 
     Returns ``(symbol, price, amount, qty_units, min_unit_units, leverage)``.
     A valid order that cannot afford one minimum unit has ``qty_units == 0``.
+    ``amount`` is a CNY budget; ``rate`` converts the quote currency to CNY.
     """
     if not args:
         return None
@@ -136,14 +156,12 @@ def parse_amount_trade_args(
             else:
                 return None
 
-        unit_cost = price * models.units_to_quantity(min_unit)
-        lots = (amount / unit_cost).to_integral_value(rounding=ROUND_FLOOR)
-        qty = int(lots) * min_unit
+        qty = calculate_amount_qty(amount, price, min_unit, rate)
         if qty:
             models.validate_qty_units(qty)
 
         raw_symbol = parts[0].upper()
-        if raw_symbol.endswith((".F", ".A", ".US", ".HK")):
+        if raw_symbol.endswith((".F", ".A", ".US", ".HK", ".BSE", ".BJ")):
             symbol = raw_symbol
         else:
             symbol = quotes.normalize_symbol(raw_symbol)
@@ -174,7 +192,7 @@ def parse_trade_args(
         leverage = parse_leverage(parts[3]) if len(parts) == 4 else None
 
         raw_symbol = parts[0].upper()
-        if raw_symbol.endswith((".F", ".A", ".US", ".HK")):
+        if raw_symbol.endswith((".F", ".A", ".US", ".HK", ".BSE", ".BJ")):
             symbol = raw_symbol
         else:
             symbol = quotes.normalize_symbol(raw_symbol)
@@ -209,6 +227,16 @@ async def verify_confirm_owner(
     ):
         await callback.answer("会话已过期，请重新发起", show_alert=True)
         return False
+    if data is not None and "confirmation_message_id" in data:
+        current_message_id = getattr(callback.message, "message_id", None)
+        if (
+            data.get("confirmation_message_id") is None
+            or current_message_id != data["confirmation_message_id"]
+        ):
+            await callback.answer(
+                "该确认已失效，请使用最新的确认按钮", show_alert=True
+            )
+            return False
     return True
 
 

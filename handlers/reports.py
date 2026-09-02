@@ -1,6 +1,10 @@
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from aiogram import Router, types
 from aiogram.filters import Command, CommandObject
 
+import config
 import models
 import pnl
 import quotes
@@ -10,13 +14,44 @@ from models import Side
 
 router = Router(name="reports")
 
+try:
+    _DISPLAY_TIMEZONE = ZoneInfo(config.DISPLAY_TIMEZONE)
+except ZoneInfoNotFoundError:
+    _DISPLAY_TIMEZONE = timezone.utc
+
+
+def format_trade_time(trade_ts: str) -> str:
+    """Render a stored UTC timestamp in the configured local timezone."""
+    try:
+        timestamp = datetime.fromisoformat(trade_ts)
+    except (TypeError, ValueError):
+        # Keep malformed/legacy data visible instead of breaking /trades.
+        return trade_ts[:10]
+
+    # Older rows may contain a date or a naive ISO timestamp. Treat those as
+    # UTC so all records follow the same storage convention.
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(_DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
 
 def position_lines(result: pnl.UserPnl) -> list[str]:
     lines = [f"{result.username} 持仓汇总：\n"]
     for position in result.positions:
+        direction = "  [空]" if position.qty < 0 else ""
+        if not position.quote_available:
+            lines.append(
+                f"{position.name} ({position.symbol}) × "
+                f"{format_qty(position.qty)}{direction}"
+                f"  [{position.currency}] "
+                f"[{format_leverage(position.leverage)}]\n"
+                f"  开仓均价 {position.avg_cost:.4f}\n"
+                "  ⚠️ 行情不可用，暂不计入市值、浮盈和汇总"
+            )
+            continue
+
         sign = "+" if position.unrealized_pnl >= 0 else ""
         sign_cny = "+" if position.unrealized_pnl_cny >= 0 else ""
-        direction = "  [空]" if position.qty < 0 else ""
         entry_label = "开仓均价" if position.qty < 0 else "成本"
 
         if position.is_foreign:
@@ -62,6 +97,13 @@ def position_lines(result: pnl.UserPnl) -> list[str]:
         f"总浮盈：{total_sign}¥{result.total_unrealized_pnl_cny:,.2f} "
         f"({total_sign}{total_pct:.2f}%)"
     )
+    unavailable_count = sum(
+        not position.quote_available for position in result.positions
+    )
+    if unavailable_count:
+        lines.append(
+            f"\n⚠️ {unavailable_count} 个持仓行情不可用，市值、浮盈和汇总暂未计入"
+        )
     return lines
 
 
@@ -116,6 +158,15 @@ async def cmd_pnl(message: types.Message) -> None:
     lines.append("\n浮动盈亏：")
     if result.positions:
         for position in result.positions:
+            if not position.quote_available:
+                direction = " [空]" if position.qty < 0 else ""
+                leverage = f" [{format_leverage(position.leverage)}]"
+                lines.append(
+                    f"{position.symbol}{direction}{leverage}  "
+                    "⚠️ 行情不可用，暂不计入浮盈"
+                )
+                continue
+
             sign = "+" if position.unrealized_pnl_cny >= 0 else ""
             direction = " [空]" if position.qty < 0 else ""
             leverage = f" [{format_leverage(position.leverage)}]"
@@ -212,7 +263,7 @@ def trade_lines(trades: list[models.Trade], limit: int = 20) -> str:
     lines = []
     for trade in trades[-limit:]:
         side_label = "买入" if trade.side == Side.BUY else "卖出"
-        date = trade.trade_ts[:10]
+        date = format_trade_time(trade.trade_ts)
         lines.append(
             f"#{trade.id}  {date}  {side_label} {trade.symbol}"
             f" × {format_qty(trade.qty)}"
