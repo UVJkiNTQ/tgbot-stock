@@ -21,10 +21,11 @@ HELP_TEXT = """股票持仓 Bot 命令：
 /buy 或 /sell SYMBOL PRICE ALL [Nx] — 可平全部或只平指定杠杆条目
 /close SYMBOL PRICE — 一次平掉该代码的全部多空杠杆条目
 /position — 查看我的持仓和浮盈（统一CNY）
-/pnl — 查看我的损益汇总
-/lb — 收益率排行榜（CNY口径）
+/pnl — 查看历史已实现收益、当前浮盈和总收益
+/lb [u|r] — 总收益排行（u，默认）或仅已实现收益排行（r）
 /trades — 查看我的交易记录（含ID）
-/del ID — 删除一笔交易记录（不带ID可查看列表）
+/del ID [ID ...] — 删除一条或多条交易记录
+/del SYMBOL Nx — 删除指定代码、杠杆的全部交易记录
 /update — 将旧数据库一次规整为当前 v1（可重复安全执行）
 
 SYMBOL 示例：600000(A股) 00700(港股) AAPL(美股)

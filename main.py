@@ -28,10 +28,10 @@ BOT_COMMANDS = [
     BotCommand(command="sella", description="按仓位卖出：/sella SYMBOL PRICE AMOUNT"),
     BotCommand(command="close", description="自动平仓：/close SYMBOL PRICE"),
     BotCommand(command="position", description="查看我的持仓和浮盈"),
-    BotCommand(command="pnl", description="查看我的损益汇总"),
-    BotCommand(command="lb", description="收益率排行榜"),
+    BotCommand(command="pnl", description="查看历史已实现收益和浮盈"),
+    BotCommand(command="lb", description="收益排行：/lb u 或 /lb r"),
     BotCommand(command="trades", description="查看我的交易记录（含ID）"),
-    BotCommand(command="del", description="删除交易记录：/del ID"),
+    BotCommand(command="del", description="按ID或代码+杠杆删除记录"),
     BotCommand(command="update", description="规整旧数据库（可重复安全执行）"),
     BotCommand(command="help", description="查看帮助"),
 ]

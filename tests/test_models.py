@@ -485,6 +485,67 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(stored_markets, [("A",), ("FUND",), ("A",)])
 
+    async def test_delete_trades_deletes_owned_ids_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                first = await models.insert_trade(
+                    1, "tester", "600000", models.Side.BUY,
+                    10.0, q(10), "CNY", 1.0,
+                )
+                second = await models.insert_trade(
+                    1, "tester", "00700", models.Side.BUY,
+                    400.0, q(10), "HKD", 0.9,
+                )
+                other_user = await models.insert_trade(
+                    2, "other", "AAPL", models.Side.BUY,
+                    200.0, q(1), "USD", 7.0,
+                )
+
+                deleted = await models.delete_trades(
+                    [first.id, second.id, other_user.id, 999], 1
+                )
+                own_remaining = await models.get_trades(1)
+                other_remaining = await models.get_trades(2)
+
+            self.assertEqual(deleted, [first.id, second.id])
+            self.assertEqual(own_remaining, [])
+            self.assertEqual([trade.id for trade in other_remaining], [other_user.id])
+
+    async def test_delete_symbol_leverage_targets_exact_market_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                await models.insert_trade(
+                    1, "tester", "002714", models.Side.BUY,
+                    40.0, q(10), "CNY", 1.0, 5, market="A",
+                )
+                await models.insert_trade(
+                    1, "tester", "002714", models.Side.BUY,
+                    41.0, q(5), "CNY", 1.0, 5, market="A",
+                )
+                await models.insert_trade(
+                    1, "tester", "002714", models.Side.BUY,
+                    39.0, q(3), "CNY", 1.0, 2, market="A",
+                )
+                await models.insert_trade(
+                    1, "tester", "002714", models.Side.BUY,
+                    1.2, q(20), "CNY", 1.0, 5, market="FUND",
+                )
+
+                deleted_count = await models.delete_trades_by_symbol_leverage(
+                    1, "002714", 5
+                )
+                remaining = await models.get_trades(1)
+
+            self.assertEqual(deleted_count, 2)
+            self.assertEqual(
+                {(trade.market, trade.leverage) for trade in remaining},
+                {("A", 2.0), ("FUND", 5.0)},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

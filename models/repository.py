@@ -241,7 +241,7 @@ async def get_trades(
                 )
         else:
             cur = await db.execute(
-                "SELECT * FROM trades WHERE user_id = ? ORDER BY trade_ts",
+                "SELECT * FROM trades WHERE user_id = ? ORDER BY trade_ts, id",
                 (user_id,),
             )
         rows = await cur.fetchall()
@@ -304,7 +304,7 @@ async def get_all_trades() -> list[Trade]:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN")
         version = await schema_version(db)
-        cur = await db.execute("SELECT * FROM trades ORDER BY trade_ts")
+        cur = await db.execute("SELECT * FROM trades ORDER BY trade_ts, id")
         rows = await cur.fetchall()
     return [_row_to_trade(row, version) for row in rows]
 
@@ -329,12 +329,59 @@ async def get_trade_by_id(trade_id: int) -> Trade | None:
 
 
 async def delete_trade(trade_id: int, user_id: int) -> bool:
+    return bool(await delete_trades([trade_id], user_id))
+
+
+async def delete_trades(trade_ids: list[int], user_id: int) -> list[int]:
+    """Atomically delete the requested IDs owned by a user.
+
+    Unknown IDs and records belonging to other users are left untouched. The
+    returned IDs are the subset that was actually deleted, in request order.
+    """
+    requested_ids = list(dict.fromkeys(trade_ids))
+    if not requested_ids:
+        return []
+
     async with aiosqlite.connect(config.DB_PATH) as db:
-        cur = await db.execute(
-            "DELETE FROM trades WHERE id = ? AND user_id = ?", (trade_id, user_id)
+        await db.execute("BEGIN IMMEDIATE")
+        rows = await (
+            await db.execute(
+                "SELECT id FROM trades WHERE user_id = ?",
+                (user_id,),
+            )
+        ).fetchall()
+        owned_ids = {int(row[0]) for row in rows}
+        deleted_ids = [trade_id for trade_id in requested_ids if trade_id in owned_ids]
+        await db.executemany(
+            "DELETE FROM trades WHERE id = ? AND user_id = ?",
+            [(trade_id, user_id) for trade_id in deleted_ids],
         )
         await db.commit()
-        return cur.rowcount > 0
+    return deleted_ids
+
+
+async def delete_trades_by_symbol_leverage(
+    user_id: int,
+    symbol: str,
+    leverage: int | float | str,
+    market: str | None = None,
+) -> int:
+    """Delete every trade in one exact instrument/leverage bucket."""
+    canonical_symbol, canonical_market = resolve_instrument(symbol, market)
+    canonical_leverage = normalize_leverage(leverage)
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM trades "
+            "WHERE user_id = ? AND symbol = ? AND market = ? AND leverage = ?",
+            (
+                user_id,
+                canonical_symbol,
+                canonical_market,
+                canonical_leverage,
+            ),
+        )
+        await db.commit()
+        return cur.rowcount
 
 
 async def get_user_summary(user_id: int) -> dict[str, int]:

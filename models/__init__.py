@@ -3,6 +3,8 @@
 import config
 from .repository import (
     delete_trade,
+    delete_trades,
+    delete_trades_by_symbol_leverage,
     get_all_trades,
     get_distinct_symbols,
     get_distinct_users,
@@ -43,6 +45,8 @@ __all__ = [
     "TradePlan",
     "config",
     "delete_trade",
+    "delete_trades",
+    "delete_trades_by_symbol_leverage",
     "get_all_trades",
     "get_distinct_symbols",
     "get_distinct_users",

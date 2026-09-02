@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock, patch
 import models
 import pnl
 from models import Side, Trade
-from pnl import calculate_cost_basis, calculate_position_state
+from pnl import (
+    calculate_cost_basis,
+    calculate_position_state,
+    calculate_trade_history,
+)
 from quotes import Quote
 
 
@@ -86,6 +90,52 @@ class CostBasisTests(unittest.TestCase):
         self.assertAlmostEqual(avg, 12.0)
         self.assertAlmostEqual(avg_cny, 12.0)
         self.assertEqual(leverage, 5.0)
+
+
+class RealizedPnlTests(unittest.TestCase):
+    def test_partial_long_close_realizes_only_matched_quantity(self) -> None:
+        history = calculate_trade_history([
+            trade(Side.BUY, 10, 100, leverage=2),
+            trade(Side.SELL, 13, 40, leverage=2),
+        ])
+
+        self.assertEqual(history.qty, models.quantity_to_units(60))
+        self.assertAlmostEqual(history.avg_cost, 10.0)
+        self.assertAlmostEqual(history.realized_pnl, 240.0)
+        self.assertAlmostEqual(history.realized_pnl_cny, 240.0)
+        self.assertAlmostEqual(history.closed_cost_cny, 400.0)
+
+    def test_partial_short_cover_realizes_profit(self) -> None:
+        history = calculate_trade_history([
+            trade(Side.SELL, 10, 100, leverage=5),
+            trade(Side.BUY, 8, 40, leverage=5),
+        ])
+
+        self.assertEqual(history.qty, -models.quantity_to_units(60))
+        self.assertAlmostEqual(history.realized_pnl, 400.0)
+        self.assertAlmostEqual(history.closed_cost_cny, 400.0)
+
+    def test_reversal_realizes_old_side_and_opens_excess(self) -> None:
+        history = calculate_trade_history([
+            trade(Side.BUY, 10, 100, leverage=2),
+            trade(Side.SELL, 12, 150, leverage=2),
+        ])
+
+        self.assertEqual(history.qty, -models.quantity_to_units(50))
+        self.assertAlmostEqual(history.avg_cost, 12.0)
+        self.assertAlmostEqual(history.realized_pnl, 400.0)
+        self.assertAlmostEqual(history.closed_cost_cny, 1000.0)
+
+    def test_realized_cny_uses_fx_rates_saved_on_trades(self) -> None:
+        history = calculate_trade_history([
+            trade(Side.BUY, 10, 100, rate=0.8),
+            trade(Side.SELL, 12, 100, rate=0.9),
+        ])
+
+        self.assertEqual(history.qty, 0)
+        self.assertAlmostEqual(history.realized_pnl, 200.0)
+        self.assertAlmostEqual(history.realized_pnl_cny, 280.0)
+        self.assertAlmostEqual(history.closed_cost_cny, 800.0)
 
 
 class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
@@ -182,6 +232,132 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(by_leverage[2.0].unrealized_pnl, 1000.0)
         self.assertAlmostEqual(by_leverage[5.0].unrealized_pnl, -1250.0)
         self.assertAlmostEqual(result.total_unrealized_pnl_cny, -250.0)
+
+
+class HistoricalUserPnlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_closed_position_is_reported_without_live_quote_lookup(self) -> None:
+        trades = [
+            trade(Side.BUY, 10, 100, leverage=2),
+            trade(Side.SELL, 13, 100, leverage=2),
+        ]
+        with (
+            patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
+            patch.object(pnl.quotes, "get_quotes", AsyncMock()) as get_quotes,
+            patch.object(pnl.quotes, "get_rate", AsyncMock()) as get_rate,
+        ):
+            result = await pnl.compute_user_pnl(1)
+
+        self.assertEqual(result.positions, [])
+        self.assertEqual(len(result.realized), 1)
+        self.assertAlmostEqual(result.total_realized_pnl_cny, 600.0)
+        self.assertAlmostEqual(result.total_unrealized_pnl_cny, 0.0)
+        self.assertAlmostEqual(result.total_pnl_cny, 600.0)
+        self.assertAlmostEqual(result.total_closed_cost_cny, 1000.0)
+        get_quotes.assert_not_awaited()
+        get_rate.assert_not_awaited()
+
+    async def test_realized_only_mode_never_fetches_open_position_prices(self) -> None:
+        trades = [
+            trade(Side.BUY, 10, 100),
+            trade(Side.SELL, 12, 40),
+        ]
+        with (
+            patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
+            patch.object(pnl.quotes, "get_quotes", AsyncMock()) as get_quotes,
+            patch.object(pnl.quotes, "get_rate", AsyncMock()) as get_rate,
+        ):
+            result = await pnl.compute_user_pnl(1, include_unrealized=False)
+
+        self.assertEqual(result.positions, [])
+        self.assertAlmostEqual(result.total_realized_pnl_cny, 80.0)
+        self.assertAlmostEqual(result.total_unrealized_pnl_cny, 0.0)
+        get_quotes.assert_not_awaited()
+        get_rate.assert_not_awaited()
+
+    async def test_realized_and_unrealized_are_combined(self) -> None:
+        trades = [
+            trade(Side.BUY, 10, 100),
+            trade(Side.SELL, 12, 40),
+        ]
+        quote = Quote(
+            symbol="00700", name="腾讯控股", price=15.0, open=15.0,
+            prev_close=15.0, high=15.0, low=15.0, market="HK",
+        )
+        with (
+            patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
+            patch.object(
+                pnl.quotes, "get_quotes",
+                AsyncMock(return_value={("00700", "HK"): quote}),
+            ),
+            patch.object(pnl.quotes, "get_rate", AsyncMock(return_value=1.0)),
+        ):
+            result = await pnl.compute_user_pnl(1)
+
+        self.assertAlmostEqual(result.total_realized_pnl_cny, 80.0)
+        self.assertAlmostEqual(result.total_unrealized_pnl_cny, 300.0)
+        self.assertAlmostEqual(result.total_pnl_cny, 380.0)
+        self.assertAlmostEqual(result.total_closed_cost_cny, 400.0)
+        self.assertAlmostEqual(result.total_cost_cny, 600.0)
+        self.assertAlmostEqual(result.total_pnl_cost_cny, 1000.0)
+
+
+class LeaderboardPnlTests(unittest.IsolatedAsyncioTestCase):
+    def result(
+        self,
+        user_id: int,
+        realized: float,
+        unrealized: float,
+        closed_cost: float,
+        open_cost: float,
+    ) -> pnl.UserPnl:
+        return pnl.UserPnl(
+            user_id=user_id,
+            username=f"user{user_id}",
+            positions=[],
+            total_unrealized_pnl_cny=unrealized,
+            total_market_value_cny=0.0,
+            total_cost_cny=open_cost,
+            total_realized_pnl_cny=realized,
+            total_closed_cost_cny=closed_cost,
+        )
+
+    async def test_unrealized_mode_ranks_total_historical_return(self) -> None:
+        first = self.result(1, 10.0, -5.0, 100.0, 100.0)
+        second = self.result(2, 5.0, 20.0, 100.0, 100.0)
+        with (
+            patch.object(
+                pnl.models,
+                "get_distinct_users",
+                AsyncMock(return_value=[(1, "user1"), (2, "user2")]),
+            ),
+            patch.object(
+                pnl,
+                "compute_user_pnl",
+                AsyncMock(side_effect=[first, second]),
+            ),
+        ):
+            board = await pnl.compute_leaderboard(include_unrealized=True)
+
+        self.assertEqual([result.user_id for result in board], [2, 1])
+
+    async def test_realized_mode_ignores_open_position_pnl(self) -> None:
+        first = self.result(1, 10.0, -1000.0, 100.0, 100.0)
+        second = self.result(2, 5.0, 1000.0, 100.0, 100.0)
+        with (
+            patch.object(
+                pnl.models,
+                "get_distinct_users",
+                AsyncMock(return_value=[(1, "user1"), (2, "user2")]),
+            ),
+            patch.object(
+                pnl,
+                "compute_user_pnl",
+                AsyncMock(side_effect=[first, second]),
+            ),
+        ):
+            board = await pnl.compute_leaderboard(include_unrealized=False)
+
+        self.assertEqual([result.user_id for result in board], [1, 2])
 
 
 class MarketIdentityPnlTests(unittest.IsolatedAsyncioTestCase):

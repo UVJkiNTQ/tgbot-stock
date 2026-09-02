@@ -369,5 +369,93 @@ class TradeInputTests(unittest.TestCase):
         self.assertAlmostEqual(_price_deviation(500.0, 475.2), 5.2188552189)
 
 
+class ReportCommandTests(unittest.IsolatedAsyncioTestCase):
+    def message(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            from_user=SimpleNamespace(id=123),
+            reply=AsyncMock(),
+        )
+
+    async def test_delete_accepts_multiple_hash_prefixed_ids(self) -> None:
+        message = self.message()
+        command = SimpleNamespace(args="#3 #5 #8")
+        with patch.object(
+            handlers.models,
+            "delete_trades",
+            AsyncMock(return_value=[3, 8]),
+        ) as delete_trades:
+            await handlers.cmd_delete(message, command)
+
+        delete_trades.assert_awaited_once_with([3, 5, 8], 123)
+        reply = message.reply.await_args.args[0]
+        self.assertIn("#3 #8", reply)
+        self.assertIn("#5", reply)
+
+    async def test_delete_accepts_symbol_and_leverage(self) -> None:
+        message = self.message()
+        command = SimpleNamespace(args="600000 5x")
+        with patch.object(
+            handlers.models,
+            "delete_trades_by_symbol_leverage",
+            AsyncMock(return_value=4),
+        ) as delete_bucket:
+            await handlers.cmd_delete(message, command)
+
+        delete_bucket.assert_awaited_once_with(123, "600000", 5.0)
+        self.assertIn("全部 4 条", message.reply.await_args.args[0])
+
+    async def test_lb_without_mode_defaults_to_unrealized_included(self) -> None:
+        message = self.message()
+        command = SimpleNamespace(args=None)
+        result = handlers.pnl.UserPnl(
+            user_id=123,
+            username="tester",
+            positions=[],
+            total_unrealized_pnl_cny=50.0,
+            total_market_value_cny=1050.0,
+            total_cost_cny=500.0,
+            total_realized_pnl_cny=100.0,
+            total_closed_cost_cny=500.0,
+        )
+        with patch.object(
+            handlers.pnl,
+            "compute_leaderboard",
+            AsyncMock(return_value=[result]),
+        ) as compute_leaderboard:
+            await handlers.cmd_leaderboard(message, command)
+
+        compute_leaderboard.assert_awaited_once_with(True)
+        reply = message.reply.await_args.args[0]
+        self.assertIn("含浮盈", reply)
+        self.assertIn("+15.00%", reply)
+        self.assertIn("+¥150.00", reply)
+
+    async def test_lb_r_uses_realized_only(self) -> None:
+        message = self.message()
+        command = SimpleNamespace(args="r")
+        result = handlers.pnl.UserPnl(
+            user_id=123,
+            username="tester",
+            positions=[],
+            total_unrealized_pnl_cny=-999.0,
+            total_market_value_cny=0.0,
+            total_cost_cny=500.0,
+            total_realized_pnl_cny=100.0,
+            total_closed_cost_cny=500.0,
+        )
+        with patch.object(
+            handlers.pnl,
+            "compute_leaderboard",
+            AsyncMock(return_value=[result]),
+        ) as compute_leaderboard:
+            await handlers.cmd_leaderboard(message, command)
+
+        compute_leaderboard.assert_awaited_once_with(False)
+        reply = message.reply.await_args.args[0]
+        self.assertIn("不含浮盈", reply)
+        self.assertIn("+20.00%", reply)
+        self.assertIn("+¥100.00", reply)
+
+
 if __name__ == "__main__":
     unittest.main()
