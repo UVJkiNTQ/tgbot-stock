@@ -24,6 +24,7 @@ def trade(
         rate=rate,
         trade_ts="2026-01-01T00:00:00+00:00",
         leverage=leverage,
+        market="HK",
     )
 
 
@@ -108,13 +109,14 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
                 "get_position_entries",
                 AsyncMock(
                     return_value=[
-                        models.PositionEntry("00700", leverage, -10000)
+                        models.PositionEntry("00700", leverage, -10000, "HK")
                     ]
                 ),
             ),
             patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
             patch.object(
-                pnl.quotes, "get_quotes", AsyncMock(return_value={"00700": quote})
+                pnl.quotes, "get_quotes",
+                AsyncMock(return_value={("00700", "HK"): quote}),
             ),
             patch.object(pnl.quotes, "get_rate", AsyncMock(return_value=1.0)),
         ):
@@ -161,14 +163,15 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
                 "get_position_entries",
                 AsyncMock(
                     return_value=[
-                        models.PositionEntry("00700", 2.0, 10000),
-                        models.PositionEntry("00700", 5.0, 5000),
+                        models.PositionEntry("00700", 2.0, 10000, "HK"),
+                        models.PositionEntry("00700", 5.0, 5000, "HK"),
                     ]
                 ),
             ),
             patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
             patch.object(
-                pnl.quotes, "get_quotes", AsyncMock(return_value={"00700": quote})
+                pnl.quotes, "get_quotes",
+                AsyncMock(return_value={("00700", "HK"): quote}),
             ),
             patch.object(pnl.quotes, "get_rate", AsyncMock(return_value=1.0)),
         ):
@@ -179,6 +182,67 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(by_leverage[2.0].unrealized_pnl, 1000.0)
         self.assertAlmostEqual(by_leverage[5.0].unrealized_pnl, -1250.0)
         self.assertAlmostEqual(result.total_unrealized_pnl_cny, -250.0)
+
+
+class MarketIdentityPnlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_code_stock_and_fund_keep_their_own_quotes(self) -> None:
+        stock_trade = Trade(
+            id=1, user_id=1, username="tester", symbol="002714",
+            side=Side.BUY, price=40.0, qty=models.quantity_to_units(100),
+            currency="CNY", rate=1.0, trade_ts="2026-01-01", market="A",
+        )
+        fund_trade = Trade(
+            id=2, user_id=1, username="tester", symbol="002714",
+            side=Side.BUY, price=1.2, qty=models.quantity_to_units(20),
+            currency="CNY", rate=1.0, trade_ts="2026-01-02", market="FUND",
+        )
+        stock_quote = Quote(
+            symbol="002714", name="牧原股份", price=42.0, open=42.0,
+            prev_close=42.0, high=42.0, low=42.0, market="A",
+        )
+        fund_quote = Quote(
+            symbol="002714", name="鹏华金城混合D", price=1.37, open=1.37,
+            prev_close=1.37, high=1.37, low=1.37, market="FUND",
+        )
+
+        async def get_trades(
+            _user_id: int, symbol: str | None = None, market: str | None = None
+        ) -> list[Trade]:
+            if symbol is None:
+                return [stock_trade, fund_trade]
+            return [stock_trade] if market == "A" else [fund_trade]
+
+        with (
+            patch.object(
+                pnl.models,
+                "get_position_entries",
+                AsyncMock(
+                    return_value=[
+                        models.PositionEntry("002714", 1.0, 10000, "A"),
+                        models.PositionEntry("002714", 1.0, 2000, "FUND"),
+                    ]
+                ),
+            ),
+            patch.object(pnl.models, "get_trades", AsyncMock(side_effect=get_trades)),
+            patch.object(
+                pnl.quotes,
+                "get_quotes",
+                AsyncMock(
+                    return_value={
+                        ("002714", "A"): stock_quote,
+                        ("002714", "FUND"): fund_quote,
+                    }
+                ),
+            ),
+            patch.object(pnl.quotes, "get_rate", AsyncMock(return_value=1.0)),
+        ):
+            result = await pnl.compute_user_pnl(1)
+
+        by_market = {position.market: position for position in result.positions}
+        self.assertEqual(by_market["A"].name, "牧原股份")
+        self.assertEqual(by_market["A"].current_price, 42.0)
+        self.assertEqual(by_market["FUND"].name, "鹏华金城混合D")
+        self.assertEqual(by_market["FUND"].current_price, 1.37)
 
 
 if __name__ == "__main__":

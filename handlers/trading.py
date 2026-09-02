@@ -133,7 +133,9 @@ async def _cmd_trade_parsed(
     market_price = quote.price
     deviation_pct = price_deviation(price, market_price)
 
-    entries = await models.get_position_entries(message.from_user.id, symbol)
+    entries = await models.get_position_entries(
+        message.from_user.id, symbol, quote.market
+    )
     is_all = requested_qty == "ALL"
     target_entries: list[PositionEntry] = []
     new_entry_notice = ""
@@ -203,6 +205,7 @@ async def _cmd_trade_parsed(
         user_id=message.from_user.id,
         username=username,
         symbol=symbol,
+        market=quote.market,
         price=price,
         qty=qty,
         currency=currency,
@@ -313,7 +316,9 @@ async def cmd_close(
     name = quote.name
     symbol = quote.symbol
 
-    entries = await models.get_position_entries(message.from_user.id, symbol)
+    entries = await models.get_position_entries(
+        message.from_user.id, symbol, quote.market
+    )
     if not entries:
         await message.reply(f"{name} ({symbol}) 当前没有持仓，无需平仓")
         return
@@ -337,6 +342,7 @@ async def cmd_close(
         user_id=message.from_user.id,
         username=username,
         symbol=symbol,
+        market=quote.market,
         price=price,
         qty=qty,
         currency=currency,
@@ -359,7 +365,7 @@ async def cmd_close(
 
     await message.reply(
         f"确认一次平仓：{name} ({symbol})\n"
-        f"将关闭 {len(entries)} 个杠杆条目：{_close_entries_text(entries)}\n"
+        f"将关闭 {len(entries)} 个条目：{_close_entries_text(entries)}\n"
         f"合计 {format_qty(qty)} 股 @ {format_money(price, currency)}"
         f" = {format_money(total_orig, currency)}{rate_line}{warn_line}",
         reply_markup=confirm_keyboard("close", message.from_user.id),

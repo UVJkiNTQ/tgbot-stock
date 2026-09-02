@@ -128,6 +128,7 @@ class BuyHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         saved = state.update_data.await_args.kwargs
         self.assertEqual(saved["symbol"], "01810")
+        self.assertEqual(saved["market"], "HK")
         self.assertEqual(saved["currency"], "HKD")
         self.assertEqual(saved["price"], 28.9)
         self.assertEqual(saved["qty"], 50000)
@@ -274,7 +275,7 @@ class CloseHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["qty"], 30000)
         self.assertTrue(saved["close_all"])
         reply = message.reply.await_args.args[0]
-        self.assertIn("将关闭 1 个杠杆条目", reply)
+        self.assertIn("将关闭 1 个条目", reply)
         self.assertIn("5x 买入300股", reply)
 
 

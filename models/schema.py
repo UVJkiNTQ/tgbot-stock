@@ -16,7 +16,7 @@ from .types import (
 
 
 # This release has one migration only: legacy v0 -> current v1. Quantity
-# normalization and leverage backfill are applied together in one transaction.
+# normalization plus leverage/market backfill are applied together.
 DB_SCHEMA_VERSION = 1
 
 
@@ -36,6 +36,23 @@ async def create_qty_integrity_triggers(db: aiosqlite.Connection) -> None:
         f"""CREATE TRIGGER IF NOT EXISTS trades_qty_integer_update
         BEFORE UPDATE OF qty ON trades WHEN {condition}
         BEGIN SELECT RAISE(ABORT, 'qty must be positive integer units'); END"""
+    )
+
+
+async def create_market_integrity_triggers(db: aiosqlite.Connection) -> None:
+    condition = (
+        "typeof(NEW.market) != 'text' OR "
+        "NEW.market NOT IN ('A','HK','US','FUND')"
+    )
+    await db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS trades_market_valid_insert
+        BEFORE INSERT ON trades WHEN {condition}
+        BEGIN SELECT RAISE(ABORT, 'invalid market'); END"""
+    )
+    await db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS trades_market_valid_update
+        BEFORE UPDATE OF market ON trades WHEN {condition}
+        BEGIN SELECT RAISE(ABORT, 'invalid market'); END"""
     )
 
 
@@ -62,7 +79,7 @@ def row_leverage(row: aiosqlite.Row) -> float:
 
 
 def position_entries_from_rows(
-    rows: list[aiosqlite.Row], version: int, symbol: str
+    rows: list[aiosqlite.Row], version: int, symbol: str, market: str
 ) -> list[PositionEntry]:
     """Aggregate open quantities into independent leverage buckets."""
     quantities: dict[float, int] = {}
@@ -72,7 +89,9 @@ def position_entries_from_rows(
         leverage = row_leverage(row)
         quantities[leverage] = quantities.get(leverage, 0) + delta
     return [
-        PositionEntry(symbol=symbol, leverage=leverage, qty=qty)
+        PositionEntry(
+            symbol=symbol, leverage=leverage, qty=qty, market=market
+        )
         for leverage, qty in quantities.items()
         if qty != 0
     ]
@@ -100,6 +119,7 @@ async def init_db() -> None:
                 price REAL NOT NULL,
                 qty INTEGER NOT NULL,
                 leverage REAL NOT NULL DEFAULT 1.0,
+                market TEXT NOT NULL CHECK(market IN ('A','HK','US','FUND')),
                 trade_ts TEXT NOT NULL
             )"""
         )
@@ -107,11 +127,32 @@ async def init_db() -> None:
             ("currency", "TEXT NOT NULL DEFAULT 'CNY'"),
             ("rate", "REAL NOT NULL DEFAULT 1.0"),
             ("leverage", "REAL NOT NULL DEFAULT 1.0"),
+            ("market", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
             except aiosqlite.OperationalError:
                 pass
+
+        # v1 has not been released yet, so market identity is part of the v1
+        # shape. This also upgrades databases created by pre-release v1 builds.
+        await db.execute(
+            "UPDATE trades SET market = CASE "
+            "WHEN symbol NOT GLOB '*[^0-9]*' AND length(symbol) = 5 THEN 'HK' "
+            "WHEN symbol NOT GLOB '*[^0-9]*' AND length(symbol) = 6 THEN 'A' "
+            "ELSE 'US' END "
+            "WHERE market IS NULL OR market = ''"
+        )
+        invalid_market = await (
+            await db.execute(
+                "SELECT id, market FROM trades "
+                "WHERE market NOT IN ('A','HK','US','FUND') LIMIT 1"
+            )
+        ).fetchone()
+        if invalid_market is not None:
+            raise DatabaseUpdateError(
+                f"交易 #{invalid_market[0]} 的市场 {invalid_market[1]!r} 无效"
+            )
 
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_trades_user ON trades(user_id)"
@@ -120,12 +161,17 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)"
         )
         await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_instrument "
+            "ON trades(symbol, market)"
+        )
+        await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_trades_side ON trades(side)"
         )
         if not table_existed:
             await db.execute(f"PRAGMA user_version = {DB_SCHEMA_VERSION}")
         if await schema_version(db) >= DB_SCHEMA_VERSION:
             await create_qty_integrity_triggers(db)
+            await create_market_integrity_triggers(db)
         await db.commit()
 
 
@@ -198,6 +244,7 @@ async def update_database() -> DatabaseUpdateResult:
                 )
 
             await create_qty_integrity_triggers(db)
+            await create_market_integrity_triggers(db)
             await db.execute(f"PRAGMA user_version = {DB_SCHEMA_VERSION}")
             await db.commit()
         except Exception:

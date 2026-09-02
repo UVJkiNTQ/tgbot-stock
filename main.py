@@ -9,6 +9,7 @@ from aiogram.types import BotCommand
 
 import config
 import handlers
+import maintenance
 import models
 
 logging.basicConfig(
@@ -46,6 +47,9 @@ async def main() -> None:
 
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    maintenance_gate = maintenance.MaintenanceMiddleware()
+    dp.message.outer_middleware(maintenance_gate)
+    dp.callback_query.outer_middleware(maintenance_gate)
     dp.include_router(handlers.router)
 
     await bot.set_my_commands(BOT_COMMANDS)

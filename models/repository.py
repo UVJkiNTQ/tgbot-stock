@@ -3,6 +3,12 @@ from datetime import datetime, timezone
 import aiosqlite
 
 import config
+from instrument import (
+    normalize_symbol,
+    parse_symbol,
+    qualified_symbol,
+    resolve_instrument,
+)
 from .schema import (
     position_entries_from_rows,
     row_leverage,
@@ -30,10 +36,11 @@ async def insert_trade(
     currency: str,
     rate: float,
     leverage: int | float | None = None,
+    market: str | None = None,
 ) -> Trade:
     qty_units = validate_qty_units(qty)
     ts = datetime.now(timezone.utc).isoformat()
-    canonical_symbol = symbol.upper()
+    canonical_symbol, canonical_market = resolve_instrument(symbol, market)
 
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -42,25 +49,27 @@ async def insert_trade(
         position_rows = await (
             await db.execute(
                 "SELECT side, qty, leverage FROM trades "
-                "WHERE user_id = ? AND symbol = ? ORDER BY trade_ts, id",
-                (user_id, canonical_symbol),
+                "WHERE user_id = ? AND symbol = ? AND market = ? "
+                "ORDER BY trade_ts, id",
+                (user_id, canonical_symbol, canonical_market),
             )
         ).fetchall()
         entries = position_entries_from_rows(
-            position_rows, version, canonical_symbol
+            position_rows, version, canonical_symbol, canonical_market
         )
         trade_plan = plan_trade(entries, side, leverage)
         effective_leverage = trade_plan.leverage
         stored_qty = units_to_stored_qty(qty_units, version)
         cur = await db.execute(
             "INSERT INTO trades "
-            "(user_id, username, symbol, side, price, qty, leverage, "
+            "(user_id, username, symbol, market, side, price, qty, leverage, "
             "currency, rate, trade_ts) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 user_id,
                 username,
                 canonical_symbol,
+                canonical_market,
                 side.value,
                 price,
                 stored_qty,
@@ -85,6 +94,7 @@ async def insert_trade(
         currency=currency,
         rate=rate,
         trade_ts=ts,
+        market=canonical_market,
     )
 
 
@@ -97,6 +107,7 @@ async def insert_close_trades(
     currency: str,
     rate: float,
     leverage: int | float | str | None = None,
+    market: str | None = None,
 ) -> list[Trade]:
     """Atomically close all matching leverage buckets for a symbol.
 
@@ -104,7 +115,7 @@ async def insert_close_trades(
     optional ``leverage`` limits it to one bucket. Passing neither (the
     /close command) closes every long and short bucket.
     """
-    canonical_symbol = symbol.upper()
+    canonical_symbol, canonical_market = resolve_instrument(symbol, market)
     ts = datetime.now(timezone.utc).isoformat()
 
     async with aiosqlite.connect(config.DB_PATH) as db:
@@ -114,12 +125,13 @@ async def insert_close_trades(
         position_rows = await (
             await db.execute(
                 "SELECT side, qty, leverage FROM trades "
-                "WHERE user_id = ? AND symbol = ? ORDER BY trade_ts, id",
-                (user_id, canonical_symbol),
+                "WHERE user_id = ? AND symbol = ? AND market = ? "
+                "ORDER BY trade_ts, id",
+                (user_id, canonical_symbol, canonical_market),
             )
         ).fetchall()
         entries = position_entries_from_rows(
-            position_rows, version, canonical_symbol
+            position_rows, version, canonical_symbol, canonical_market
         )
         target_leverage = (
             normalize_leverage(leverage) if leverage is not None else None
@@ -147,13 +159,14 @@ async def insert_close_trades(
             stored_qty = units_to_stored_qty(qty_units, version)
             cur = await db.execute(
                 "INSERT INTO trades "
-                "(user_id, username, symbol, side, price, qty, leverage, "
+                "(user_id, username, symbol, market, side, price, qty, leverage, "
                 "currency, rate, trade_ts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     user_id,
                     username,
                     canonical_symbol,
+                    canonical_market,
                     closing_side.value,
                     price,
                     stored_qty,
@@ -176,6 +189,7 @@ async def insert_close_trades(
                     currency=currency,
                     rate=rate,
                     trade_ts=ts,
+                    market=canonical_market,
                 )
             )
         await db.commit()
@@ -195,20 +209,36 @@ def _row_to_trade(row: aiosqlite.Row, version: int) -> Trade:
         currency=row["currency"] or "CNY",
         rate=row["rate"] or 1.0,
         trade_ts=row["trade_ts"],
+        market=row["market"],
     )
 
 
-async def get_trades(user_id: int, symbol: str | None = None) -> list[Trade]:
+async def get_trades(
+    user_id: int, symbol: str | None = None, market: str | None = None
+) -> list[Trade]:
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN")
         version = await schema_version(db)
         if symbol:
-            cur = await db.execute(
-                "SELECT * FROM trades WHERE user_id = ? AND symbol = ? "
-                "ORDER BY trade_ts",
-                (user_id, symbol.upper()),
-            )
+            base, forced_market = parse_symbol(symbol)
+            requested_market = market or forced_market
+            if requested_market is not None:
+                canonical_symbol, canonical_market = resolve_instrument(
+                    base, requested_market
+                )
+                cur = await db.execute(
+                    "SELECT * FROM trades "
+                    "WHERE user_id = ? AND symbol = ? AND market = ? "
+                    "ORDER BY trade_ts",
+                    (user_id, canonical_symbol, canonical_market),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT * FROM trades WHERE user_id = ? AND symbol = ? "
+                    "ORDER BY market, trade_ts",
+                    (user_id, normalize_symbol(base)),
+                )
         else:
             cur = await db.execute(
                 "SELECT * FROM trades WHERE user_id = ? ORDER BY trade_ts",
@@ -219,7 +249,7 @@ async def get_trades(user_id: int, symbol: str | None = None) -> list[Trade]:
 
 
 async def get_position_entries(
-    user_id: int, symbol: str | None = None
+    user_id: int, symbol: str | None = None, market: str | None = None
 ) -> list[PositionEntry]:
     """Return open positions grouped independently by symbol and leverage."""
     async with aiosqlite.connect(config.DB_PATH) as db:
@@ -227,28 +257,44 @@ async def get_position_entries(
         await db.execute("BEGIN")
         version = await schema_version(db)
         if symbol:
-            canonical_symbol = symbol.upper()
-            cur = await db.execute(
-                "SELECT symbol, side, qty, leverage FROM trades "
-                "WHERE user_id = ? AND symbol = ? ORDER BY trade_ts, id",
-                (user_id, canonical_symbol),
-            )
+            base, forced_market = parse_symbol(symbol)
+            requested_market = market or forced_market
+            if requested_market is not None:
+                canonical_symbol, canonical_market = resolve_instrument(
+                    base, requested_market
+                )
+                cur = await db.execute(
+                    "SELECT symbol, market, side, qty, leverage FROM trades "
+                    "WHERE user_id = ? AND symbol = ? AND market = ? "
+                    "ORDER BY trade_ts, id",
+                    (user_id, canonical_symbol, canonical_market),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT symbol, market, side, qty, leverage FROM trades "
+                    "WHERE user_id = ? AND symbol = ? "
+                    "ORDER BY market, trade_ts, id",
+                    (user_id, normalize_symbol(base)),
+                )
         else:
             cur = await db.execute(
-                "SELECT symbol, side, qty, leverage FROM trades "
-                "WHERE user_id = ? ORDER BY symbol, trade_ts, id",
+                "SELECT symbol, market, side, qty, leverage FROM trades "
+                "WHERE user_id = ? ORDER BY symbol, market, trade_ts, id",
                 (user_id,),
             )
         rows = await cur.fetchall()
 
-    rows_by_symbol: dict[str, list[aiosqlite.Row]] = {}
+    rows_by_instrument: dict[tuple[str, str], list[aiosqlite.Row]] = {}
     for row in rows:
-        rows_by_symbol.setdefault(row["symbol"], []).append(row)
+        key = (row["symbol"], row["market"])
+        rows_by_instrument.setdefault(key, []).append(row)
 
     entries: list[PositionEntry] = []
-    for row_symbol, symbol_rows in rows_by_symbol.items():
+    for (row_symbol, row_market), instrument_rows in rows_by_instrument.items():
         entries.extend(
-            position_entries_from_rows(symbol_rows, version, row_symbol)
+            position_entries_from_rows(
+                instrument_rows, version, row_symbol, row_market
+            )
         )
     return entries
 
@@ -265,9 +311,11 @@ async def get_all_trades() -> list[Trade]:
 
 async def get_distinct_symbols() -> list[str]:
     async with aiosqlite.connect(config.DB_PATH) as db:
-        cur = await db.execute("SELECT DISTINCT symbol FROM trades ORDER BY symbol")
+        cur = await db.execute(
+            "SELECT DISTINCT symbol, market FROM trades ORDER BY symbol, market"
+        )
         rows = await cur.fetchall()
-    return [row[0] for row in rows]
+    return [qualified_symbol(row[0], row[1]) for row in rows]
 
 
 async def get_trade_by_id(trade_id: int) -> Trade | None:
@@ -290,10 +338,11 @@ async def delete_trade(trade_id: int, user_id: int) -> bool:
 
 
 async def get_user_summary(user_id: int) -> dict[str, int]:
-    """Return {symbol: signed net hundredth-share units} for a user."""
+    """Return {qualified symbol: signed net units} for a user."""
     summary: dict[str, int] = {}
     for entry in await get_position_entries(user_id):
-        summary[entry.symbol] = summary.get(entry.symbol, 0) + entry.qty
+        key = qualified_symbol(entry.symbol, entry.market)
+        summary[key] = summary.get(key, 0) + entry.qty
     return {symbol: qty for symbol, qty in summary.items() if qty != 0}
 
 

@@ -30,6 +30,7 @@ async def insert_confirmed_trades(
             data["currency"],
             data["rate"],
             data.get("requested_leverage"),
+            market=data["market"],
         )
     if side is None:
         return []
@@ -44,6 +45,7 @@ async def insert_confirmed_trades(
             data["currency"],
             data["rate"],
             data.get("requested_leverage"),
+            market=data["market"],
         )
     ]
 
@@ -82,7 +84,7 @@ async def on_buy_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     trade = trades[0]
-    quote = await quotes.get_quote(trade.symbol)
+    quote = await quotes.get_quote(trade.symbol, trade.market)
     name = quote.name if quote and quote.price else trade.symbol
     if data.get("close_all"):
         await callback.message.edit_text(
@@ -120,7 +122,7 @@ async def on_sell_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     trade = trades[0]
-    quote = await quotes.get_quote(trade.symbol)
+    quote = await quotes.get_quote(trade.symbol, trade.market)
     name = quote.name if quote and quote.price else trade.symbol
     if data.get("close_all"):
         await callback.message.edit_text(
@@ -156,7 +158,7 @@ async def on_close_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     trade = trades[0]
-    quote = await quotes.get_quote(trade.symbol)
+    quote = await quotes.get_quote(trade.symbol, trade.market)
     name = quote.name if quote and quote.price else trade.symbol
     await callback.message.edit_text(
         f"已一次平仓：{name} ({trade.symbol})\n"

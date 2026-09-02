@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import quotes
 
@@ -65,6 +66,59 @@ class RateTests(unittest.IsolatedAsyncioTestCase):
         quotes.clear_cache()
         quotes._rate_cache["HKD"] = (0.9, time.time())
         self.assertEqual(await quotes.get_rate("hkd"), 0.9)
+
+
+class MarketIdentityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        quotes.clear_cache()
+
+    async def test_same_code_stock_and_fund_have_independent_cache_keys(self) -> None:
+        stock = quotes.Quote(
+            symbol="002714", name="牧原股份", price=42.03,
+            open=42.3, prev_close=42.4, high=42.61, low=41.95,
+            market="A",
+        )
+        fund = quotes.Quote(
+            symbol="002714", name="鹏华金城混合D", price=1.37,
+            open=1.3711, prev_close=1.3711, high=1.3711, low=1.37,
+            market="FUND",
+        )
+        with (
+            patch.object(
+                quotes, "_fetch_sina", AsyncMock(return_value={"002714": stock})
+            ),
+            patch.object(
+                quotes, "_fetch_funds", AsyncMock(return_value={"002714": fund})
+            ),
+        ):
+            fetched = await quotes.get_quotes(
+                [("002714", "A"), ("002714", "FUND")]
+            )
+
+        self.assertIs(fetched[("002714", "A")], stock)
+        self.assertIs(fetched[("002714", "FUND")], fund)
+        self.assertEqual(quotes._quote_cache[("002714", "A")][0].market, "A")
+        self.assertEqual(
+            quotes._quote_cache[("002714", "FUND")][0].market, "FUND"
+        )
+
+    async def test_fund_fallback_cannot_satisfy_an_a_share_request(self) -> None:
+        fund = quotes.Quote(
+            symbol="002714", name="鹏华金城混合D", price=1.37,
+            open=1.3711, prev_close=1.3711, high=1.3711, low=1.37,
+            market="FUND",
+        )
+        with (
+            patch.object(quotes, "_fetch_sina", AsyncMock(return_value={})),
+            patch.object(
+                quotes, "_fetch_funds", AsyncMock(return_value={"002714": fund})
+            ),
+        ):
+            stock = await quotes.get_quote("002714.A")
+            cached_fund = await quotes.get_quote("002714.F")
+
+        self.assertIsNone(stock)
+        self.assertIs(cached_fund, fund)
 
 
 if __name__ == "__main__":

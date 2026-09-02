@@ -1,10 +1,14 @@
+import logging
+
 from aiogram import Router, types
 from aiogram.filters import Command
 
 import models
+import maintenance
 
 
 router = Router(name="system")
+logger = logging.getLogger(__name__)
 
 
 HELP_TEXT = """股票持仓 Bot 命令：
@@ -42,20 +46,41 @@ async def cmd_help(message: types.Message) -> None:
 
 @router.message(Command("update"))
 async def cmd_update(message: types.Message) -> None:
+    if not await maintenance.begin_maintenance():
+        await message.reply("数据库已经在维护中，请等待完成通知")
+        return
+
     try:
-        result = await models.update_database()
-    except models.DatabaseUpdateError as exc:
-        await message.reply(f"数据库规整失败，未修改任何数据：{exc}")
-        return
-
-    if not result.updated:
         await message.reply(
-            f"数据库已经是最新格式（v{result.new_version}），无需重复规整"
+            "⚠️ 数据库维护开始，请暂时不要使用交易和查询命令。\n"
+            "处理完成后会在这里通知。"
         )
-        return
+        try:
+            result = await models.update_database()
+        except models.DatabaseUpdateError as exc:
+            await message.reply(
+                f"数据库规整失败，未修改任何数据：{exc}\n"
+                "维护结束，可以继续使用"
+            )
+            return
+        except Exception:
+            logger.exception("数据库规整出现未预期错误")
+            await message.reply(
+                "数据库规整失败，事务已回滚。维护结束，可以继续使用"
+            )
+            return
 
-    await message.reply(
-        f"数据库规整完成：v{result.old_version} → v{result.new_version}\n"
-        f"数量已转换 {result.rows_updated} 条：数据库中的 1 = 0.01 股\n"
-        "已增加杠杆字段；历史交易统一为 1x"
-    )
+        if not result.updated:
+            await message.reply(
+                f"数据库已经是最新格式（v{result.new_version}），维护结束，可以继续使用"
+            )
+            return
+
+        await message.reply(
+            f"数据库规整完成：v{result.old_version} → v{result.new_version}\n"
+            f"数量已转换 {result.rows_updated} 条：数据库中的 1 = 0.01 股\n"
+            "已增加杠杆和市场字段；历史交易统一为 1x，市场按代码补齐\n"
+            "维护结束，现在可以继续使用"
+        )
+    finally:
+        await maintenance.end_maintenance()

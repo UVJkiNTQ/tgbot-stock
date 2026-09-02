@@ -26,6 +26,7 @@ class Trade:
     rate: float  # exchange rate to CNY at trade time
     trade_ts: str
     leverage: float = 1.0
+    market: str = "A"
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class PositionEntry:
     symbol: str
     leverage: float
     qty: int  # signed integer hundredth-share units
+    market: str = "A"
 
 
 @dataclass(frozen=True)

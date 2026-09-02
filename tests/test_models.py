@@ -47,7 +47,7 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
                 )
                 summary = await models.get_user_summary(1)
 
-            self.assertEqual(summary, {"600000": -q(60)})
+            self.assertEqual(summary, {"600000.A": -q(60)})
 
     async def test_fresh_database_stores_integer_hundredth_share_units(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,12 +69,16 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
                 version = (await (await db.execute("PRAGMA user_version")).fetchone())[0]
                 with self.assertRaises(aiosqlite.IntegrityError):
                     await db.execute("UPDATE trades SET qty = 0.5 WHERE id = 1")
+                with self.assertRaises(aiosqlite.IntegrityError):
+                    await db.execute(
+                        "UPDATE trades SET market = 'INVALID' WHERE id = 1"
+                    )
 
             self.assertEqual(rows, [(100, "integer"), (1, "integer")])
-            self.assertEqual(summary, {"600000": 101})
+            self.assertEqual(summary, {"600000.A": 101})
             self.assertIs(type(whole_trade.qty), int)
             self.assertIs(type(fractional_trade.qty), int)
-            self.assertIs(type(summary["600000"]), int)
+            self.assertIs(type(summary["600000.A"]), int)
             self.assertEqual(version, models.DB_SCHEMA_VERSION)
 
     async def test_update_backfills_legacy_rows_once_and_preserves_visible_qty(self) -> None:
@@ -117,19 +121,65 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             async with aiosqlite.connect(db_path) as db:
                 raw_rows = await (
                     await db.execute(
-                        "SELECT qty, leverage FROM trades ORDER BY id"
+                        "SELECT qty, leverage, market FROM trades ORDER BY id"
                     )
                 ).fetchall()
                 version = (await (await db.execute("PRAGMA user_version")).fetchone())[0]
 
-            self.assertEqual(before, {"600000": 30025})
+            self.assertEqual(before, {"600000.A": 30025})
             self.assertTrue(first.updated)
             self.assertEqual(first.rows_updated, 2)
-            self.assertEqual(raw_rows, [(30000, 1.0), (25, 1.0)])
-            self.assertEqual(after, {"600000": 30025})
+            self.assertEqual(
+                raw_rows,
+                [(30000, 1.0, "A"), (25, 1.0, "A")],
+            )
+            self.assertEqual(after, {"600000.A": 30025})
             self.assertFalse(second.updated)
             self.assertEqual(version, 1)
             self.assertEqual(models.DB_SCHEMA_VERSION, 1)
+
+    async def test_init_backfills_market_in_prerelease_v1_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute(
+                    """CREATE TABLE trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
+                        price REAL NOT NULL,
+                        qty INTEGER NOT NULL,
+                        leverage REAL NOT NULL DEFAULT 1.0,
+                        currency TEXT NOT NULL DEFAULT 'CNY',
+                        rate REAL NOT NULL DEFAULT 1.0,
+                        trade_ts TEXT NOT NULL
+                    )"""
+                )
+                await db.execute(
+                    "INSERT INTO trades "
+                    "(user_id, username, symbol, side, price, qty, trade_ts) "
+                    "VALUES (1, 'tester', '002714', 'SELL', 45, 20000, "
+                    "'2026-09-02')"
+                )
+                await db.execute("PRAGMA user_version = 1")
+                await db.commit()
+
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                entries = await models.get_position_entries(1)
+
+            async with aiosqlite.connect(db_path) as db:
+                market = await (
+                    await db.execute("SELECT market FROM trades")
+                ).fetchone()
+
+            self.assertEqual(market, ("A",))
+            self.assertEqual(
+                entries,
+                [models.PositionEntry("002714", 1.0, -20000, "A")],
+            )
 
     async def test_fractional_short_and_close_remain_exact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -156,7 +206,7 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
                     ).fetchall()
                 ]
 
-            self.assertEqual(before, {"600000": -75})
+            self.assertEqual(before, {"600000.A": -75})
             self.assertEqual(len(closing_trades), 1)
             self.assertEqual(closing_trades[0].qty, 75)
             self.assertEqual(raw_qty, [125, 50, 75])
@@ -181,7 +231,7 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(opened.leverage, 5.0)
             self.assertEqual(added.leverage, 5.0)
             self.assertEqual(reversed_trade.leverage, 5.0)
-            self.assertEqual(summary, {"600000": -q(50)})
+            self.assertEqual(summary, {"600000.A": -q(50)})
 
     async def test_wrong_leverage_cannot_close_another_bucket(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -371,7 +421,7 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
                 summary = await models.get_user_summary(1)
 
             self.assertEqual(closing_trades, [])
-            self.assertEqual(summary, {"600000": -q(100)})
+            self.assertEqual(summary, {"600000.A": -q(100)})
 
     async def test_close_automatically_chooses_side_for_long_and_short(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -395,6 +445,45 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(short_close[0].side, models.Side.BUY)
             self.assertEqual(long_close[0].side, models.Side.SELL)
             self.assertEqual(summary, {})
+
+    async def test_same_code_markets_are_stored_and_managed_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                stock = await models.insert_trade(
+                    1, "tester", "002714", models.Side.BUY,
+                    40.0, q(100), "CNY", 1.0, market="A",
+                )
+                fund = await models.insert_trade(
+                    1, "tester", "002714", models.Side.BUY,
+                    1.2, q(20), "CNY", 1.0, market="FUND",
+                )
+                entries = await models.get_position_entries(1, "002714")
+                await models.insert_close_trades(
+                    1, "tester", "002714", None, 42.0, "CNY", 1.0,
+                    market="A",
+                )
+                remaining = await models.get_position_entries(1, "002714")
+
+            async with aiosqlite.connect(db_path) as db:
+                stored_markets = await (
+                    await db.execute(
+                        "SELECT market FROM trades ORDER BY id"
+                    )
+                ).fetchall()
+
+            self.assertEqual(stock.market, "A")
+            self.assertEqual(fund.market, "FUND")
+            self.assertEqual(
+                {(entry.market, entry.qty) for entry in entries},
+                {("A", q(100)), ("FUND", q(20))},
+            )
+            self.assertEqual(
+                remaining,
+                [models.PositionEntry("002714", 1.0, q(20), "FUND")],
+            )
+            self.assertEqual(stored_markets, [("A",), ("FUND",), ("A",)])
 
 
 if __name__ == "__main__":

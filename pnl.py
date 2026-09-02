@@ -8,6 +8,7 @@ from models import Side, Trade
 @dataclass
 class Position:
     symbol: str
+    market: str
     name: str
     qty: int  # signed integer hundredth-share units
     avg_cost: float
@@ -124,8 +125,10 @@ async def compute_user_pnl(user_id: int) -> UserPnl:
             total_unrealized_pnl_cny=0.0, total_market_value_cny=0.0, total_cost_cny=0.0,
         )
 
-    symbols = list(dict.fromkeys(entry.symbol for entry in entries))
-    qmap = await quotes.get_quotes(symbols)
+    instruments = list(
+        dict.fromkeys((entry.symbol, entry.market) for entry in entries)
+    )
+    qmap = await quotes.get_quotes(instruments)
 
     positions: list[Position] = []
     total_cost_cny = 0.0
@@ -133,26 +136,28 @@ async def compute_user_pnl(user_id: int) -> UserPnl:
 
     rate_map: dict[str, float] = {}
 
-    trades_by_symbol = {
-        symbol: await models.get_trades(user_id, symbol) for symbol in symbols
+    trades_by_instrument = {
+        (symbol, market): await models.get_trades(user_id, symbol, market)
+        for symbol, market in instruments
     }
 
     for entry in entries:
         sym = entry.symbol
+        market = entry.market
         net_qty = entry.qty
         trades = [
             trade
-            for trade in trades_by_symbol[sym]
+            for trade in trades_by_instrument[(sym, market)]
             if trade.leverage == entry.leverage
         ]
         avg_cost, avg_cost_cny, leverage = calculate_position_state(trades)
-        currency = trades[-1].currency or quotes.market_currency(sym)
+        currency = trades[-1].currency or quotes.market_currency(sym, market)
 
         if currency not in rate_map:
             rate_map[currency] = await quotes.get_rate(currency)
         cur_rate = rate_map[currency]
 
-        q = qmap.get(quotes.normalize_symbol(sym))
+        q = qmap.get((quotes.normalize_symbol(sym), market))
         name = q.name if q else sym
         cur_price = q.price if q else 0.0
 
@@ -171,6 +176,7 @@ async def compute_user_pnl(user_id: int) -> UserPnl:
 
         positions.append(Position(
             symbol=sym,
+            market=market,
             name=name,
             qty=net_qty,
             avg_cost=avg_cost,

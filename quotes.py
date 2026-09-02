@@ -8,6 +8,12 @@ import httpx
 import yfinance as yf  # type: ignore
 
 import config
+from instrument import (
+    detect_market,
+    normalize_symbol,
+    parse_symbol,
+    resolve_instrument,
+)
 
 
 @dataclass
@@ -24,7 +30,10 @@ class Quote:
 
 MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD", "FUND": "CNY"}
 
-_quote_cache: dict[str, tuple[Quote, float]] = {}
+InstrumentKey = tuple[str, str]
+
+
+_quote_cache: dict[InstrumentKey, tuple[Quote, float]] = {}
 _rate_cache: dict[str, tuple[float, float]] = {}
 RATE_CACHE_TTL = 600.0  # 10 min
 
@@ -33,77 +42,9 @@ class RateUnavailableError(RuntimeError):
     pass
 
 
-def normalize_symbol(symbol: str) -> str:
-    """Return the canonical symbol used by quote providers and the database."""
-    s = symbol.strip().upper()
-    if not s:
-        raise ValueError("symbol cannot be empty")
-
-    # Optional market qualifier suffixes let users force a market when a code
-    # is ambiguous (e.g. a fund vs a stock). They are stripped here so the
-    # canonical symbol stored in the database stays clean.
-    if s.endswith(".F"):
-        s = s[:-2]
-    elif s.endswith(".A"):
-        s = s[:-2]
-    elif s.endswith(".US"):
-        s = s[:-3]
-    elif s.endswith(".HK") and s[:-3].isdigit():
-        s = s[:-3]
-    elif s.startswith("HK") and s[2:].isdigit():
-        s = s[2:]
-
-    # Hong Kong codes are conventionally five digits, but users commonly omit
-    # their leading zeroes (700 / 0700 instead of 00700).
-    if s.isdigit() and len(s) <= 5:
-        return s.zfill(5)
-    return s
-
-
-def parse_symbol(symbol: str) -> tuple[str, str | None]:
-    """Return (canonical_symbol, forced_market_or_None).
-
-    A trailing qualifier ('.F', '.A', '.US', '.HK') forces the market instead
-    of relying on heuristic detection, letting users disambiguate codes that
-    could be both a stock and a fund.
-    """
-    s = symbol.strip().upper()
-    if not s:
-        raise ValueError("symbol cannot be empty")
-    forced: str | None = None
-    if s.endswith(".F"):
-        forced = "FUND"
-        s = s[:-2]
-    elif s.endswith(".A"):
-        forced = "A"
-        s = s[:-2]
-    elif s.endswith(".US"):
-        forced = "US"
-        s = s[:-3]
-    elif s.endswith(".HK") and s[:-3].isdigit():
-        forced = "HK"
-        s = s[:-3]
-    if forced == "FUND":
-        # Funds are six-digit; do not apply the five-digit HK zero-padding.
-        return s, forced
-    return normalize_symbol(s), forced
-
-
-def detect_market(symbol: str) -> str:
-    s = normalize_symbol(symbol)
-    if s.isdigit():
-        if len(s) == 5:
-            return "HK"
-        if len(s) == 6:
-            first = s[0]
-            if first in ("5", "6", "9"):
-                return "A"
-            return "A"
-    return "US"
-
-
-def market_currency(symbol: str) -> str:
-    return MARKET_CURRENCY.get(detect_market(symbol), "CNY")
+def market_currency(symbol: str, market: str | None = None) -> str:
+    _, resolved_market = resolve_instrument(symbol, market)
+    return MARKET_CURRENCY.get(resolved_market, "CNY")
 
 
 def quote_currency(quote: Quote) -> str:
@@ -111,9 +52,9 @@ def quote_currency(quote: Quote) -> str:
     return MARKET_CURRENCY.get(quote.market, "CNY")
 
 
-def _sina_list(symbol: str) -> str:
+def _sina_list(symbol: str, market: str | None = None) -> str:
     s = normalize_symbol(symbol)
-    m = detect_market(s)
+    _, m = resolve_instrument(s, market)
     if m == "HK":
         return f"hk{s.zfill(5)}"
     if m == "A":
@@ -167,11 +108,13 @@ async def _fetch_funds(symbols: list[str]) -> dict[str, Quote]:
     return results
 
 
-def _parse_sina_fields(symbol: str, fields: list[str]) -> Quote | None:
+def _parse_sina_fields(
+    symbol: str, fields: list[str], market: str | None = None
+) -> Quote | None:
     """Parse one Sina quote; A-share and HK payload layouts differ."""
-    market = detect_market(symbol)
+    _, resolved_market = resolve_instrument(symbol, market)
     try:
-        if market == "HK":
+        if resolved_market == "HK":
             # HK: English name, Chinese name, open, previous close, high,
             # low, current price, ...
             if len(fields) < 7 or not fields[6]:
@@ -194,19 +137,21 @@ def _parse_sina_fields(symbol: str, fields: list[str]) -> Quote | None:
             prev_close=float(prev_close) if prev_close else 0.0,
             high=float(high) if high else 0.0,
             low=float(low) if low else 0.0,
-            market=market,
+            market=resolved_market,
         )
     except (ValueError, IndexError):
         return None
 
 
-async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
+async def _fetch_sina(
+    symbols: list[str], market: str | None = None
+) -> dict[str, Quote]:
     results: dict[str, Quote] = {}
     sina_codes = []
     code_map: dict[str, str] = {}
     for sym in symbols:
         try:
-            sc = _sina_list(sym)
+            sc = _sina_list(sym, market)
             sina_codes.append(sc)
             code_map[sc] = sym
         except ValueError:
@@ -239,7 +184,7 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, Quote]:
             continue
         sym = code_map[sc]
         fields = text[start:end].split(",")
-        quote = _parse_sina_fields(sym, fields)
+        quote = _parse_sina_fields(sym, fields, market)
         if quote is not None:
             results[sym] = quote
     return results
@@ -281,60 +226,82 @@ async def _fetch_us(symbols: list[str]) -> dict[str, Quote]:
     return results
 
 
-async def get_quote(symbol: str) -> Quote | None:
-    base, _ = parse_symbol(symbol)
-    quotes = await get_quotes([symbol])
-    return quotes.get(base)
+async def get_quote(symbol: str, market: str | None = None) -> Quote | None:
+    key = resolve_instrument(symbol, market)
+    fetched = await get_quotes([key])
+    return fetched.get(key)
 
 
-async def get_quotes(symbols: list[str]) -> dict[str, Quote]:
-    results: dict[str, Quote] = {}
+async def get_quotes(
+    instruments: list[str | InstrumentKey],
+) -> dict[InstrumentKey, Quote]:
+    results: dict[InstrumentKey, Quote] = {}
     now = time.time()
 
-    sina_syms: list[str] = []
+    a_syms: list[str] = []
+    hk_syms: list[str] = []
     us_syms: list[str] = []
     fund_syms: list[str] = []
 
-    for sym in symbols:
-        base, forced = parse_symbol(sym)
-        cached = _quote_cache.get(base)
+    keys = list(
+        dict.fromkeys(
+            resolve_instrument(item[0], item[1])
+            if isinstance(item, tuple)
+            else resolve_instrument(item)
+            for item in instruments
+        )
+    )
+    for base, market in keys:
+        key = (base, market)
+        cached = _quote_cache.get(key)
         if cached and now - cached[1] < config.QUOTE_CACHE_TTL:
-            results[base] = cached[0]
+            results[key] = cached[0]
             continue
-        if forced == "FUND":
+        if market == "FUND":
             fund_syms.append(base)
-            continue
-        m = detect_market(base)
-        if m == "US":
+        elif market == "US":
             us_syms.append(base)
+        elif market == "HK":
+            hk_syms.append(base)
         else:
-            sina_syms.append(base)
+            a_syms.append(base)
 
     missed_a_syms: list[str] = []
 
-    if sina_syms:
-        sina_results = await _fetch_sina(sina_syms)
+    for market, symbols in (("A", a_syms), ("HK", hk_syms)):
+        if not symbols:
+            continue
+        sina_results = await _fetch_sina(symbols, market)
         now2 = time.time()
         for sym, q in sina_results.items():
-            _quote_cache[sym] = (q, now2)
-            results[sym] = q
-        for sym in sina_syms:
-            if sym not in sina_results and detect_market(sym) == "A":
-                missed_a_syms.append(sym)
+            key = (sym, market)
+            _quote_cache[key] = (q, now2)
+            results[key] = q
+        if market == "A":
+            for sym in symbols:
+                if sym not in sina_results:
+                    missed_a_syms.append(sym)
 
     if missed_a_syms or fund_syms:
-        fund_results = await _fetch_funds(list(dict.fromkeys(missed_a_syms + fund_syms)))
+        fund_results = await _fetch_funds(
+            list(dict.fromkeys(missed_a_syms + fund_syms))
+        )
         now2 = time.time()
         for sym, q in fund_results.items():
-            _quote_cache[sym] = (q, now2)
-            results[sym] = q
+            key = (sym, "FUND")
+            _quote_cache[key] = (q, now2)
+            # A same-code fund discovered while probing a missing A quote is
+            # cached under its own identity, never returned as the A asset.
+            if key in keys:
+                results[key] = q
 
     if us_syms:
         us_results = await _fetch_us(us_syms)
         now2 = time.time()
         for sym, q in us_results.items():
-            _quote_cache[sym] = (q, now2)
-            results[sym] = q
+            key = (sym, "US")
+            _quote_cache[key] = (q, now2)
+            results[key] = q
 
     return results
 
