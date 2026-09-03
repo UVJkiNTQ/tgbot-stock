@@ -28,6 +28,7 @@ class Position:
     cost_cny: float = 0.0
     unrealized_pnl_cny: float = 0.0
     quote_available: bool = True
+    margin_cny: float = 0.0
 
     @property
     def is_foreign(self) -> bool:
@@ -43,6 +44,7 @@ class RealizedPnl:
     realized_pnl: float
     realized_pnl_cny: float
     closed_cost_cny: float
+    closed_margin_cny: float = 0.0
 
     @property
     def is_foreign(self) -> bool:
@@ -60,6 +62,8 @@ class UserPnl:
     realized: list[RealizedPnl] = field(default_factory=list)
     total_realized_pnl_cny: float = 0.0
     total_closed_cost_cny: float = 0.0
+    total_margin_cny: float = 0.0
+    total_closed_margin_cny: float = 0.0
 
     @property
     def total_pnl_cny(self) -> float:
@@ -67,8 +71,17 @@ class UserPnl:
 
     @property
     def total_pnl_cost_cny(self) -> float:
-        """Return denominator: closed entry costs plus open entry costs."""
-        return self.total_closed_cost_cny + self.total_cost_cny
+        """Return the margin denominator used for return percentages.
+
+        The name is retained for compatibility with older callers. New code
+        should use :attr:`total_pnl_margin_cny` for clarity.
+        """
+        return self.total_pnl_margin_cny
+
+    @property
+    def total_pnl_margin_cny(self) -> float:
+        """Return closed plus open entry margin."""
+        return self.total_closed_margin_cny + self.total_margin_cny
 
 
 @dataclass
@@ -81,6 +94,7 @@ class TradeHistory:
     realized_pnl: float = 0.0
     realized_pnl_cny: float = 0.0
     closed_cost_cny: float = 0.0
+    closed_margin_cny: float = 0.0
 
 
 def calculate_trade_history(trades: list[Trade]) -> TradeHistory:
@@ -89,6 +103,8 @@ def calculate_trade_history(trades: list[Trade]) -> TradeHistory:
     Opposite-side trades realize PnL for the matched quantity. A trade that
     crosses zero opens the excess quantity at that trade's price. Historical
     CNY PnL uses the FX rate stored on each trade, never today's FX rate.
+    Leverage changes the margin and return percentage, not the PnL amount for
+    a quantity that already represents the actual number of shares.
     """
     state = TradeHistory()
 
@@ -129,15 +145,16 @@ def calculate_trade_history(trades: list[Trade]) -> TradeHistory:
             (trade.price - state.avg_cost)
             * closed_quantity
             * direction
-            * state.leverage
         )
         state.realized_pnl_cny += (
             (trade_cost_cny - state.avg_cost_cny)
             * closed_quantity
             * direction
-            * state.leverage
         )
         state.closed_cost_cny += state.avg_cost_cny * closed_quantity
+        state.closed_margin_cny += (
+            state.avg_cost_cny * closed_quantity / state.leverage
+        )
 
         new_qty = state.qty + trade_qty
         if abs(trade_qty) < old_size:
@@ -227,6 +244,7 @@ async def compute_user_pnl(
                     realized_pnl=history.realized_pnl,
                     realized_pnl_cny=history.realized_pnl_cny,
                     closed_cost_cny=history.closed_cost_cny,
+                    closed_margin_cny=history.closed_margin_cny,
                 )
             )
 
@@ -256,6 +274,7 @@ async def compute_user_pnl(
                 leverage=history.leverage,
                 quote_available=False,
                 cost_cny=cost_cny,
+                margin_cny=cost_cny / history.leverage,
             ))
             continue
 
@@ -271,13 +290,11 @@ async def compute_user_pnl(
         mv_cny = mv * cur_rate
         entry_value = abs(net_qty) * avg_cost / models.QTY_SCALE
         cost_cny = abs(net_qty) * avg_cost_cny / models.QTY_SCALE
-        pnl = (
-            mv - net_qty * avg_cost / models.QTY_SCALE
-        ) * history.leverage
-        pnl_cny = (
-            mv_cny - net_qty * avg_cost_cny / models.QTY_SCALE
-        ) * history.leverage
-        pnl_pct = pnl / entry_value * 100 if entry_value else 0.0
+        pnl = mv - net_qty * avg_cost / models.QTY_SCALE
+        pnl_cny = mv_cny - net_qty * avg_cost_cny / models.QTY_SCALE
+        margin_cny = cost_cny / history.leverage
+        margin_value = entry_value / history.leverage
+        pnl_pct = pnl / margin_value * 100 if margin_value else 0.0
 
         positions.append(Position(
             symbol=sym,
@@ -297,6 +314,7 @@ async def compute_user_pnl(
             market_value_cny=mv_cny,
             cost_cny=cost_cny,
             unrealized_pnl_cny=pnl_cny,
+            margin_cny=margin_cny,
         ))
         total_cost_cny += cost_cny
         total_market_value_cny += mv_cny
@@ -311,6 +329,12 @@ async def compute_user_pnl(
         realized=sorted(realized, key=lambda item: item.realized_pnl_cny, reverse=True),
         total_realized_pnl_cny=sum(item.realized_pnl_cny for item in realized),
         total_closed_cost_cny=sum(item.closed_cost_cny for item in realized),
+        total_margin_cny=sum(
+            position.margin_cny
+            for position in positions
+            if position.quote_available
+        ),
+        total_closed_margin_cny=sum(item.closed_margin_cny for item in realized),
     )
 
 
@@ -323,14 +347,18 @@ async def compute_leaderboard(include_unrealized: bool = True) -> list[UserPnl]:
             if include_unrealized
             else await compute_user_pnl(uid, include_unrealized=False)
         )
-        basis = p.total_pnl_cost_cny if include_unrealized else p.total_closed_cost_cny
+        basis = (
+            p.total_pnl_margin_cny
+            if include_unrealized
+            else p.total_closed_margin_cny
+        )
         if basis > 0:
             results.append(p)
 
     def return_rate(result: UserPnl) -> float:
         if include_unrealized:
-            return result.total_pnl_cny / result.total_pnl_cost_cny
-        return result.total_realized_pnl_cny / result.total_closed_cost_cny
+            return result.total_pnl_cny / result.total_pnl_margin_cny
+        return result.total_realized_pnl_cny / result.total_closed_margin_cny
 
     results.sort(
         key=return_rate,

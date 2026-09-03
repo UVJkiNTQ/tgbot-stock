@@ -67,7 +67,9 @@ def position_lines(result: pnl.UserPnl) -> list[str]:
                 f"  ¥现价 {position.current_price_cny:.4f}\n"
                 f"  浮盈 {sign}{position.unrealized_pnl:.2f} "
                 f"{position.currency}"
-                f" (≈¥{sign_cny}{position.unrealized_pnl_cny:.2f})"
+                f" (≈¥{sign_cny}{position.unrealized_pnl_cny:.2f}, "
+                f"{sign}{position.unrealized_pnl_pct:.2f}%)\n"
+                f"  保证金 ¥{position.margin_cny:,.2f}"
             )
         else:
             lines.append(
@@ -77,13 +79,14 @@ def position_lines(result: pnl.UserPnl) -> list[str]:
                 f"  {entry_label} {position.avg_cost:.4f}  "
                 f"现价 {position.current_price:.4f}\n"
                 f"  浮盈 {sign}{position.unrealized_pnl:.2f} "
-                f"({sign}{position.unrealized_pnl_pct:.2f}%)"
+                f"({sign}{position.unrealized_pnl_pct:.2f}%)\n"
+                f"  保证金 ¥{position.margin_cny:,.2f}"
             )
 
     total_sign = "+" if result.total_unrealized_pnl_cny >= 0 else ""
     total_pct = (
-        result.total_unrealized_pnl_cny / result.total_cost_cny * 100
-        if result.total_cost_cny
+        result.total_unrealized_pnl_cny / result.total_margin_cny * 100
+        if result.total_margin_cny
         else 0.0
     )
     value_label = (
@@ -93,7 +96,8 @@ def position_lines(result: pnl.UserPnl) -> list[str]:
     )
     lines.append(
         f"\n{value_label}¥{result.total_market_value_cny:,.2f}\n"
-        f"总成本：¥{result.total_cost_cny:,.2f}\n"
+        f"总名义成本：¥{result.total_cost_cny:,.2f}\n"
+        f"总保证金：¥{result.total_margin_cny:,.2f}\n"
         f"总浮盈：{total_sign}¥{result.total_unrealized_pnl_cny:,.2f} "
         f"({total_sign}{total_pct:.2f}%)"
     )
@@ -137,7 +141,11 @@ async def cmd_pnl(message: types.Message) -> None:
         for item in result.realized:
             sign = "+" if item.realized_pnl_cny >= 0 else ""
             sign_orig = "+" if item.realized_pnl >= 0 else ""
-            return_pct = item.realized_pnl_cny / item.closed_cost_cny * 100
+            return_pct = (
+                item.realized_pnl_cny / item.closed_margin_cny * 100
+                if item.closed_margin_cny
+                else 0.0
+            )
             if item.is_foreign:
                 detail = (
                     f"{sign_orig}{item.realized_pnl:.2f} {item.currency}  "
@@ -176,7 +184,8 @@ async def cmd_pnl(message: types.Message) -> None:
                     f"{position.symbol}{direction}{leverage}  "
                     f"{sign_orig}{position.unrealized_pnl:.2f}"
                     f" {position.currency}"
-                    f"  (≈¥{sign}{position.unrealized_pnl_cny:.2f})"
+                    f"  (≈¥{sign}{position.unrealized_pnl_cny:.2f}, "
+                    f"{sign_orig}{position.unrealized_pnl_pct:.2f}%)"
                 )
             else:
                 lines.append(
@@ -191,8 +200,8 @@ async def cmd_pnl(message: types.Message) -> None:
     unrealized_sign = "+" if result.total_unrealized_pnl_cny >= 0 else ""
     total_sign = "+" if result.total_pnl_cny >= 0 else ""
     total_pct = (
-        result.total_pnl_cny / result.total_pnl_cost_cny * 100
-        if result.total_pnl_cost_cny
+        result.total_pnl_cny / result.total_pnl_margin_cny * 100
+        if result.total_pnl_margin_cny
         else 0.0
     )
     lines.append(
@@ -243,10 +252,10 @@ async def cmd_leaderboard(
     for index, user_pnl in enumerate(board):
         if include_unrealized:
             amount = user_pnl.total_pnl_cny
-            basis = user_pnl.total_pnl_cost_cny
+            basis = user_pnl.total_pnl_margin_cny
         else:
             amount = user_pnl.total_realized_pnl_cny
-            basis = user_pnl.total_closed_cost_cny
+            basis = user_pnl.total_closed_margin_cny
         ret = amount / basis * 100
         sign = "+" if ret >= 0 else ""
         amount_sign = "+" if amount >= 0 else ""

@@ -488,6 +488,8 @@ class ReportCommandTests(unittest.IsolatedAsyncioTestCase):
             total_cost_cny=500.0,
             total_realized_pnl_cny=100.0,
             total_closed_cost_cny=500.0,
+            total_margin_cny=500.0,
+            total_closed_margin_cny=500.0,
         )
         with patch.object(
             handlers.pnl,
@@ -514,6 +516,8 @@ class ReportCommandTests(unittest.IsolatedAsyncioTestCase):
             total_cost_cny=500.0,
             total_realized_pnl_cny=100.0,
             total_closed_cost_cny=500.0,
+            total_margin_cny=500.0,
+            total_closed_margin_cny=500.0,
         )
         with patch.object(
             handlers.pnl,

@@ -101,9 +101,10 @@ class RealizedPnlTests(unittest.TestCase):
 
         self.assertEqual(history.qty, models.quantity_to_units(60))
         self.assertAlmostEqual(history.avg_cost, 10.0)
-        self.assertAlmostEqual(history.realized_pnl, 240.0)
-        self.assertAlmostEqual(history.realized_pnl_cny, 240.0)
+        self.assertAlmostEqual(history.realized_pnl, 120.0)
+        self.assertAlmostEqual(history.realized_pnl_cny, 120.0)
         self.assertAlmostEqual(history.closed_cost_cny, 400.0)
+        self.assertAlmostEqual(history.closed_margin_cny, 200.0)
 
     def test_partial_short_cover_realizes_profit(self) -> None:
         history = calculate_trade_history([
@@ -112,8 +113,9 @@ class RealizedPnlTests(unittest.TestCase):
         ])
 
         self.assertEqual(history.qty, -models.quantity_to_units(60))
-        self.assertAlmostEqual(history.realized_pnl, 400.0)
+        self.assertAlmostEqual(history.realized_pnl, 80.0)
         self.assertAlmostEqual(history.closed_cost_cny, 400.0)
+        self.assertAlmostEqual(history.closed_margin_cny, 80.0)
 
     def test_reversal_realizes_old_side_and_opens_excess(self) -> None:
         history = calculate_trade_history([
@@ -123,8 +125,9 @@ class RealizedPnlTests(unittest.TestCase):
 
         self.assertEqual(history.qty, -models.quantity_to_units(50))
         self.assertAlmostEqual(history.avg_cost, 12.0)
-        self.assertAlmostEqual(history.realized_pnl, 400.0)
+        self.assertAlmostEqual(history.realized_pnl, 200.0)
         self.assertAlmostEqual(history.closed_cost_cny, 1000.0)
+        self.assertAlmostEqual(history.closed_margin_cny, 500.0)
 
     def test_realized_cny_uses_fx_rates_saved_on_trades(self) -> None:
         history = calculate_trade_history([
@@ -190,13 +193,15 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(position.unrealized_pnl_pct, -20.0)
         self.assertAlmostEqual(result.total_unrealized_pnl_cny, -200.0)
 
-    async def test_leverage_multiplies_short_profit_and_return(self) -> None:
+    async def test_leverage_changes_return_but_not_short_profit(self) -> None:
         result = await self._compute_at(8.0, leverage=5.0)
         position = result.positions[0]
         self.assertEqual(position.leverage, 5.0)
-        self.assertAlmostEqual(position.unrealized_pnl, 1000.0)
+        self.assertAlmostEqual(position.unrealized_pnl, 200.0)
         self.assertAlmostEqual(position.unrealized_pnl_pct, 100.0)
-        self.assertAlmostEqual(result.total_unrealized_pnl_cny, 1000.0)
+        self.assertAlmostEqual(position.margin_cny, 200.0)
+        self.assertAlmostEqual(result.total_unrealized_pnl_cny, 200.0)
+        self.assertAlmostEqual(result.total_margin_cny, 200.0)
 
     async def test_different_leverages_are_reported_as_separate_positions(self) -> None:
         trades = [
@@ -229,9 +234,55 @@ class ShortPositionPnlTests(unittest.IsolatedAsyncioTestCase):
 
         by_leverage = {position.leverage: position for position in result.positions}
         self.assertEqual(set(by_leverage), {2.0, 5.0})
-        self.assertAlmostEqual(by_leverage[2.0].unrealized_pnl, 1000.0)
-        self.assertAlmostEqual(by_leverage[5.0].unrealized_pnl, -1250.0)
-        self.assertAlmostEqual(result.total_unrealized_pnl_cny, -250.0)
+        self.assertAlmostEqual(by_leverage[2.0].unrealized_pnl, 500.0)
+        self.assertAlmostEqual(by_leverage[2.0].unrealized_pnl_pct, 100.0)
+        self.assertAlmostEqual(by_leverage[5.0].unrealized_pnl, -250.0)
+        self.assertAlmostEqual(by_leverage[5.0].unrealized_pnl_pct, -125.0)
+        self.assertAlmostEqual(result.total_unrealized_pnl_cny, 250.0)
+        self.assertAlmostEqual(result.total_margin_cny, 700.0)
+
+
+class LeveragedMarginPnlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_us_position_uses_leverage_for_margin_return_only(self) -> None:
+        trades = [
+            Trade(
+                id=1,
+                user_id=1,
+                username="tester",
+                symbol="NVDA",
+                side=Side.BUY,
+                price=225.0,
+                qty=models.quantity_to_units("65.97"),
+                currency="USD",
+                rate=6.7365,
+                trade_ts="2026-01-01T00:00:00+00:00",
+                leverage=100.0,
+                market="US",
+            )
+        ]
+        quote = Quote(
+            symbol="NVDA", name="英伟达", price=224.41, open=224.41,
+            prev_close=224.41, high=224.41, low=224.41, market="US",
+        )
+        with (
+            patch.object(pnl.models, "get_trades", AsyncMock(return_value=trades)),
+            patch.object(
+                pnl.quotes,
+                "get_quotes",
+                AsyncMock(return_value={("NVDA", "US"): quote}),
+            ),
+            patch.object(pnl.quotes, "get_rate", AsyncMock(return_value=6.7365)),
+        ):
+            result = await pnl.compute_user_pnl(1)
+
+        position = result.positions[0]
+        self.assertAlmostEqual(position.unrealized_pnl, -38.9223)
+        self.assertAlmostEqual(position.unrealized_pnl_cny, -262.20007395)
+        self.assertAlmostEqual(position.unrealized_pnl_pct, -26.22222222)
+        self.assertAlmostEqual(position.margin_cny, 999.91553625)
+        self.assertAlmostEqual(result.total_cost_cny, 99991.553625)
+        self.assertAlmostEqual(result.total_market_value_cny, 99729.35355105)
+        self.assertAlmostEqual(result.total_margin_cny, 999.91553625)
 
 
 class HistoricalUserPnlTests(unittest.IsolatedAsyncioTestCase):
@@ -271,10 +322,11 @@ class HistoricalUserPnlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.positions, [])
         self.assertEqual(len(result.realized), 1)
-        self.assertAlmostEqual(result.total_realized_pnl_cny, 600.0)
+        self.assertAlmostEqual(result.total_realized_pnl_cny, 300.0)
         self.assertAlmostEqual(result.total_unrealized_pnl_cny, 0.0)
-        self.assertAlmostEqual(result.total_pnl_cny, 600.0)
+        self.assertAlmostEqual(result.total_pnl_cny, 300.0)
         self.assertAlmostEqual(result.total_closed_cost_cny, 1000.0)
+        self.assertAlmostEqual(result.total_closed_margin_cny, 500.0)
         get_quotes.assert_not_awaited()
         get_rate.assert_not_awaited()
 
@@ -341,6 +393,8 @@ class LeaderboardPnlTests(unittest.IsolatedAsyncioTestCase):
             total_cost_cny=open_cost,
             total_realized_pnl_cny=realized,
             total_closed_cost_cny=closed_cost,
+            total_margin_cny=open_cost,
+            total_closed_margin_cny=closed_cost,
         )
 
     async def test_unrealized_mode_ranks_total_historical_return(self) -> None:
