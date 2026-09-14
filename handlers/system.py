@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = """股票持仓 Bot 命令：
 
 /quote SYMBOL — 查实时行情
-/buy SYMBOL PRICE QTY [Nx] — 买入；杠杆必须以 x 结尾
-/sell SYMBOL PRICE QTY [Nx] — 卖出；杠杆必须以 x 结尾
+/buy SYMBOL PRICE QTY [Nx] — 买入；如填写杠杆需以 x 结尾
+/sell SYMBOL PRICE QTY [Nx] — 卖出；如填写杠杆需以 x 结尾
 /buya SYMBOL PRICE AMOUNT [Nx] [Ns] — 按人民币预算计算最大买入量
 /sella SYMBOL PRICE AMOUNT [Nx] [Ns] — 按人民币预算计算最大卖出量
 /buy 或 /sell SYMBOL PRICE ALL [Nx] — 可平全部或只平指定杠杆条目
@@ -32,7 +32,8 @@ SYMBOL 示例：600000(A股) 920118(北交所) 00700(港股) AAPL(美股)
 ETF 也支持：510050 159919 02800
 
 同方向使用不同杠杆会建立独立持仓条目。
-已有持仓后的普通 B/S 必须显式填写杠杆；反向交易必须匹配目标条目（包括 1x）。
+已有同向持仓时省略杠杆会沿用该标的最近一笔交易的杠杆，并在确认消息中展示；
+普通反向交易仍必须显式填写目标杠杆（包括 1x）。
 自动算量命令中，AMOUNT 均为人民币预算，并按标的币种汇率换算；
 100s / 1s / 01s / 001s 表示最小单位 100 / 1 / 0.1 / 0.01 股；省略时为 0.01 股。
 

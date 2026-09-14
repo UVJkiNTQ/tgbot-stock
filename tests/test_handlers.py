@@ -208,6 +208,40 @@ class BuyHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("新的 2x 独立持仓条目", reply)
         self.assertEqual(state.update_data.await_args.kwargs["requested_leverage"], 2.0)
 
+    async def test_omitted_leverage_reuses_latest_transaction_and_shows_confirmation(self) -> None:
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(
+                id=123, username="tester", full_name="Test User"
+            ),
+            reply=AsyncMock(),
+        )
+        command = SimpleNamespace(args="600000 10 50")
+        state = SimpleNamespace(set_state=AsyncMock(), update_data=AsyncMock())
+        quote = Quote(
+            symbol="600000", name="浦发银行", price=10.0, open=10.0,
+            prev_close=10.0, high=10.0, low=10.0, market="A",
+        )
+
+        with (
+            patch.object(handlers.quotes, "get_quote", AsyncMock(return_value=quote)),
+            patch.object(handlers.quotes, "get_rate", AsyncMock(return_value=1.0)),
+            patch.object(
+                handlers.models, "get_position_entries",
+                AsyncMock(return_value=[models.PositionEntry("600000", 5.0, 10000)]),
+            ),
+            patch.object(
+                handlers.models, "get_latest_trade_leverage",
+                AsyncMock(return_value=5.0),
+            ) as get_latest,
+        ):
+            await handlers.cmd_buy(message, command, state)
+
+        get_latest.assert_awaited_once_with(123, "600000", "A")
+        saved = state.update_data.await_args.kwargs
+        self.assertIsNone(saved["requested_leverage"])
+        self.assertEqual(saved["effective_leverage"], 5.0)
+        self.assertIn("杠杆 5x（未指定，沿用最近一笔交易）", message.reply.await_args.args[0])
+
     async def test_wrong_leverage_cannot_reduce_an_existing_position(self) -> None:
         message = SimpleNamespace(
             from_user=SimpleNamespace(

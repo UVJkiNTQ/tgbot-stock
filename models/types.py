@@ -111,35 +111,51 @@ def plan_trade(
     entries: list[PositionEntry],
     side: Side,
     requested_leverage: int | float | str | Decimal | None,
+    fallback_leverage: int | float | str | Decimal | None = None,
 ) -> TradePlan:
     """Select the leverage bucket for a non-ALL trade.
 
-    A same-direction order may create a new leverage bucket. An order that
-    reduces or reverses an existing bucket must explicitly name that bucket's
-    leverage, so an omitted or mistyped leverage cannot close the wrong entry.
+    A same-direction order may create a new leverage bucket. When an open
+    position exists and the caller has a recent transaction for this
+    instrument, ``fallback_leverage`` is used when the command omitted
+    leverage. An order that reduces or reverses an existing bucket must still
+    explicitly name that bucket's leverage, so an omitted leverage cannot
+    close the wrong entry.
     """
-    leverage = (
-        normalize_leverage(requested_leverage)
-        if requested_leverage is not None
-        else 1.0
-    )
-    current_qty = next(
-        (entry.qty for entry in entries if entry.leverage == leverage), 0
-    )
+    if requested_leverage is not None:
+        leverage = normalize_leverage(requested_leverage)
+    elif entries and fallback_leverage is not None:
+        leverage = normalize_leverage(fallback_leverage)
+    else:
+        leverage = 1.0
     order_sign = 1 if side == Side.BUY else -1
     opposite_entries = [
         entry for entry in entries if entry.qty * order_sign < 0
     ]
 
-    if entries and requested_leverage is None:
-        if opposite_entries:
-            raise LeverageMismatchError(
-                "普通反向交易必须显式填写目标杠杆，例如 1x；"
-                "也可以使用 ALL 或 /close 一次平仓"
-            )
+    if requested_leverage is None and opposite_entries:
         raise LeverageMismatchError(
-            "已有持仓时必须显式填写杠杆；填写其他杠杆会建立新的独立条目"
+            "普通反向交易必须显式填写目标杠杆，例如 1x；"
+            "也可以使用 ALL 或 /close 一次平仓"
         )
+
+    # If recent transaction history is unavailable, a single open bucket is
+    # still unambiguous and is a safe fallback; multiple buckets require the
+    # repository's recent-transaction lookup.
+    if requested_leverage is None and entries and fallback_leverage is None:
+        same_direction_entries = [
+            entry for entry in entries if entry.qty * order_sign > 0
+        ]
+        if len(same_direction_entries) == 1:
+            leverage = same_direction_entries[0].leverage
+        else:
+            raise LeverageMismatchError(
+                "无法确定沿用的杠杆，请显式填写目标杠杆"
+            )
+
+    current_qty = next(
+        (entry.qty for entry in entries if entry.leverage == leverage), 0
+    )
 
     if current_qty == 0 and opposite_entries:
         available = "、".join(f"{entry.leverage:g}x" for entry in opposite_entries)

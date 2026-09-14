@@ -89,7 +89,8 @@ def _trade_usage(side: Side) -> str:
         f"或：/{command} SYMBOL PRICE ALL [Nx]\n"
         f"示例：/{command} 600000 {example_price} 100 5x\n"
         f"{all_label}：/{command} 600000 {example_price} ALL\n"
-        "杠杆必须以 x 结尾，例如 1x、2.5x、5x"
+        "如填写杠杆必须以 x 结尾，例如 1x、2.5x、5x；"
+        "已有同向持仓时可省略，系统会沿用最近一笔交易的杠杆"
     )
 
 
@@ -186,6 +187,7 @@ async def _cmd_trade_parsed(
     is_all = requested_qty == "ALL"
     target_entries: list[PositionEntry] = []
     new_entry_notice = ""
+    recent_leverage = None
 
     if is_all:
         target_entries = [entry for entry in entries if _is_closed_by(entry, side)]
@@ -215,8 +217,17 @@ async def _cmd_trade_parsed(
         )
     else:
         assert isinstance(requested_qty, int)
+        if requested_leverage is None and entries:
+            recent_leverage = await models.get_latest_trade_leverage(
+                message.from_user.id, symbol, quote.market
+            )
         try:
-            trade_plan = models.plan_trade(entries, side, requested_leverage)
+            trade_plan = models.plan_trade(
+                entries,
+                side,
+                requested_leverage,
+                fallback_leverage=recent_leverage,
+            )
         except models.LeverageMismatchError as exc:
             await message.reply(f"操作无效：{exc}")
             return
@@ -265,13 +276,18 @@ async def _cmd_trade_parsed(
         deviation_ack=False,
         close_all=is_all,
         requested_leverage=requested_leverage,
+        effective_leverage=effective_leverage,
     )
 
-    leverage_line = (
-        ""
-        if effective_leverage is None
-        else f"\n杠杆 {format_leverage(effective_leverage)}"
-    )
+    leverage_line = ""
+    if effective_leverage is not None:
+        leverage_line = f"\n杠杆 {format_leverage(effective_leverage)}"
+        if (
+            not is_all
+            and requested_leverage is None
+            and recent_leverage is not None
+        ):
+            leverage_line += "（未指定，沿用最近一笔交易）"
     rate_line = ""
     if currency != "CNY":
         rate_line = f"\n汇率 {currency}/CNY: {rate:.4f}  (≈¥{total_cny:,.2f})"

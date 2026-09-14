@@ -57,6 +57,11 @@ async def insert_confirmed_trades(
         )
     if side is None:
         return []
+    effective_leverage = data.get("effective_leverage")
+    if effective_leverage is None:
+        # Pending confirmations created before this field was introduced, and
+        # ALL confirmations, continue to use their original request value.
+        effective_leverage = data.get("requested_leverage")
     return [
         await models.insert_trade(
             data["user_id"],
@@ -67,7 +72,7 @@ async def insert_confirmed_trades(
             data["qty"],
             data["currency"],
             data["rate"],
-            data.get("requested_leverage"),
+            effective_leverage,
             market=data["market"],
         )
     ]

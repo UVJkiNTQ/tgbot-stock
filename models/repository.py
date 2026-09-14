@@ -57,7 +57,17 @@ async def insert_trade(
         entries = position_entries_from_rows(
             position_rows, version, canonical_symbol, canonical_market
         )
-        trade_plan = plan_trade(entries, side, leverage)
+        recent_leverage = (
+            row_leverage(position_rows[-1])
+            if entries and position_rows
+            else None
+        )
+        trade_plan = plan_trade(
+            entries,
+            side,
+            leverage,
+            fallback_leverage=recent_leverage,
+        )
         effective_leverage = trade_plan.leverage
         stored_qty = units_to_stored_qty(qty_units, version)
         cur = await db.execute(
@@ -96,6 +106,24 @@ async def insert_trade(
         trade_ts=ts,
         market=canonical_market,
     )
+
+
+async def get_latest_trade_leverage(
+    user_id: int, symbol: str, market: str | None = None
+) -> float | None:
+    """Return the leverage on the most recent transaction for an instrument."""
+    canonical_symbol, canonical_market = resolve_instrument(symbol, market)
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                "SELECT leverage FROM trades "
+                "WHERE user_id = ? AND symbol = ? AND market = ? "
+                "ORDER BY trade_ts DESC, id DESC LIMIT 1",
+                (user_id, canonical_symbol, canonical_market),
+            )
+        ).fetchone()
+    return row_leverage(row) if row is not None else None
 
 
 async def insert_close_trades(

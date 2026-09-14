@@ -386,24 +386,48 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
                     1, "tester", "600000", models.Side.BUY,
                     10.0, q(100), "CNY", 1.0, 5,
                 )
-                with self.assertRaises(models.LeverageMismatchError):
-                    await models.insert_trade(
-                        1, "tester", "600000", models.Side.BUY,
-                        11.0, q(50), "CNY", 1.0,
-                    )
+                added = await models.insert_trade(
+                    1, "tester", "600000", models.Side.BUY,
+                    11.0, q(50), "CNY", 1.0,
+                )
                 await models.insert_trade(
                     1, "tester", "600000", models.Side.BUY,
                     11.0, q(50), "CNY", 1.0, 2,
                 )
                 entries = await models.get_position_entries(1, "600000")
 
+            self.assertEqual(added.leverage, 5.0)
             self.assertEqual(
                 entries,
                 [
-                    models.PositionEntry("600000", 5.0, q(100)),
+                    models.PositionEntry("600000", 5.0, q(150)),
                     models.PositionEntry("600000", 2.0, q(50)),
                 ],
             )
+
+    async def test_latest_transaction_leverage_is_used_for_an_open_instrument(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                await models.insert_trade(
+                    1, "tester", "600000", models.Side.BUY,
+                    10.0, q(100), "CNY", 1.0, 5,
+                )
+                await models.insert_trade(
+                    1, "tester", "600000", models.Side.BUY,
+                    11.0, q(50), "CNY", 1.0, 2,
+                )
+                await models.insert_close_trades(
+                    1, "tester", "600000", models.Side.SELL,
+                    12.0, "CNY", 1.0, 2,
+                )
+                added = await models.insert_trade(
+                    1, "tester", "600000", models.Side.BUY,
+                    13.0, q(50), "CNY", 1.0,
+                )
+
+            self.assertEqual(added.leverage, 2.0)
 
     async def test_all_buy_atomically_closes_a_short_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
