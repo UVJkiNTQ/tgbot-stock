@@ -33,6 +33,10 @@ python main.py
 | `/sell SYMBOL PRICE QTY [Nx]` | 卖出或按指定杠杆建立空仓 | `/sell 600000 11.00 100 5x` |
 | `/buya SYMBOL PRICE AMOUNT [Nx] [Ns]` | 按人民币预算计算不超预算的最大买入量 | `/buya 600000 10.50 10000 5x 100s` |
 | `/sella SYMBOL PRICE AMOUNT [Nx] [Ns]` | 按人民币预算计算不超预算的最大卖出量 | `/sella 600000 11.00 10000 5x 100s` |
+| `/buyn SYMBOL QTY [Nx]` | 使用 `/quote` 现价买入，仍需确认 | `/buyn 600000 100 5x` |
+| `/selln SYMBOL QTY [Nx]` | 使用 `/quote` 现价卖出，仍需确认 | `/selln 600000 100 5x` |
+| `/buyna SYMBOL AMOUNT [Nx] [Ns]` | 使用现价按人民币预算计算最大买入量 | `/buyna 600000 10000 5x 100s` |
+| `/sellna SYMBOL AMOUNT [Nx] [Ns]` | 使用现价按人民币预算计算最大卖出量 | `/sellna 600000 10000 5x 100s` |
 | `/buy SYMBOL PRICE ALL [Nx]` | 平全部空头，或只平指定杠杆空头 | `/buy 600000 10.50 ALL`；`/buy 600000 10.50 ALL 5x` |
 | `/sell SYMBOL PRICE ALL [Nx]` | 平全部多头，或只平指定杠杆多头 | `/sell 600000 11.00 ALL`；`/sell 600000 11.00 ALL 5x` |
 | `/close SYMBOL PRICE` | 一次平掉该代码的全部多空杠杆条目 | `/close 600000 11.00` |
@@ -61,6 +65,7 @@ python main.py
 - 美股：Yahoo Finance
 - 场外基金：天天基金（估算净值）
 - 行情按“证券代码 + 市场”分别缓存 3 秒，避免同代码股票与基金串线
+- `/buyn`、`/selln`、`/buyna`、`/sellna` 自动使用与 `/quote` 同源的行情价格（含相同缓存），按确认单价格记录；确认、取消、杠杆与预算规则均与原命令相同，`/buyn`、`/selln` 也支持 `ALL [Nx]`
 - 买入/卖出价格偏离现价 >5% 时需二次确认，按钮仅有发起人本人可操作
 - 支持负持仓（先卖后买）；空头价格上涨时亏损、下跌时盈利
 - QTY 使用“股”为输入单位并支持最多两位小数；例如输入 `1` 股存为整数 `100`，输入 `0.01` 股存为整数 `1`

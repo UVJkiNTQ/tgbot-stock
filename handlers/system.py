@@ -18,6 +18,10 @@ HELP_TEXT = """股票持仓 Bot 命令：
 /sell SYMBOL PRICE QTY [Nx] — 卖出；如填写杠杆需以 x 结尾
 /buya SYMBOL PRICE AMOUNT [Nx] [Ns] — 按人民币预算计算最大买入量
 /sella SYMBOL PRICE AMOUNT [Nx] [Ns] — 按人民币预算计算最大卖出量
+/buyn SYMBOL QTY [Nx] — 使用 /quote 现价买入
+/selln SYMBOL QTY [Nx] — 使用 /quote 现价卖出
+/buyna SYMBOL AMOUNT [Nx] [Ns] — 使用现价按人民币预算计算最大买入量
+/sellna SYMBOL AMOUNT [Nx] [Ns] — 使用现价按人民币预算计算最大卖出量
 /buy 或 /sell SYMBOL PRICE ALL [Nx] — 可平全部或只平指定杠杆条目
 /close SYMBOL PRICE — 一次平掉该代码的全部多空杠杆条目
 /position — 查看我的持仓和浮盈（统一CNY）
@@ -35,6 +39,7 @@ ETF 也支持：510050 159919 02800
 已有同向持仓时省略杠杆会沿用该标的最近一笔交易的杠杆，并在确认消息中展示；
 普通反向交易仍必须显式填写目标杠杆（包括 1x）。
 自动算量命令中，AMOUNT 均为人民币预算，并按标的币种汇率换算；
+现价命令仍需用户确认，按确认单中的行情价格记录；/buyn、/selln 也支持 ALL [Nx]。
 100s / 1s / 01s / 001s 表示最小单位 100 / 1 / 0.1 / 0.01 股；省略时为 0.01 股。
 
 代码冲突时强制指定类型（加后缀）：

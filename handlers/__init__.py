@@ -33,10 +33,14 @@ from .callbacks import (
 from .trading import (
     cmd_buy,
     cmd_buya,
+    cmd_buyn,
+    cmd_buyna,
     cmd_close,
     cmd_quote,
     cmd_sell,
     cmd_sella,
+    cmd_selln,
+    cmd_sellna,
     router as trade_commands_router,
 )
 from .common import (
@@ -91,6 +95,8 @@ __all__ = [
     "TradeConfirm",
     "cmd_buy",
     "cmd_buya",
+    "cmd_buyn",
+    "cmd_buyna",
     "cmd_close",
     "cmd_delete",
     "cmd_help",
@@ -100,6 +106,8 @@ __all__ = [
     "cmd_quote",
     "cmd_sell",
     "cmd_sella",
+    "cmd_selln",
+    "cmd_sellna",
     "cmd_trades",
     "cmd_update",
     "models",

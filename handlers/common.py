@@ -119,12 +119,15 @@ def calculate_amount_qty(
 def parse_amount_trade_args(
     args: str,
     rate: Decimal | float = 1.0,
+    *,
+    calculate_qty: bool = True,
 ) -> tuple[str, float, Decimal, int, int, float | None] | None:
     """Parse an amount-sized trade and calculate its affordable quantity.
 
     Returns ``(symbol, price, amount, qty_units, min_unit_units, leverage)``.
     A valid order that cannot afford one minimum unit has ``qty_units == 0``.
     ``amount`` is a CNY budget; ``rate`` converts the quote currency to CNY.
+    Set ``calculate_qty=False`` to validate arguments before fetching a quote.
     """
     if not args:
         return None
@@ -156,7 +159,7 @@ def parse_amount_trade_args(
             else:
                 return None
 
-        qty = calculate_amount_qty(amount, price, min_unit, rate)
+        qty = calculate_amount_qty(amount, price, min_unit, rate) if calculate_qty else 0
         if qty:
             models.validate_qty_units(qty)
 

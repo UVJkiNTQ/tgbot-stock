@@ -1,4 +1,5 @@
 import logging
+import math
 from decimal import Decimal
 
 from aiogram import Router, types
@@ -80,8 +81,15 @@ async def _invalidate_previous_confirmation(
         )
 
 
-def _trade_usage(side: Side) -> str:
+def _trade_usage(side: Side, at_market: bool = False) -> str:
     command = "buy" if side == Side.BUY else "sell"
+    if at_market:
+        return (
+            f"用法：/{command}n SYMBOL QTY [Nx]\n"
+            f"或：/{command}n SYMBOL ALL [Nx]\n"
+            f"示例：/{command}n 600000 100 5x\n"
+            "使用 /quote 同源现价，确认后按确认单价格记录；杠杆规则与原命令相同"
+        )
     example_price = "10.50" if side == Side.BUY else "11.00"
     all_label = "平空仓" if side == Side.BUY else "平多仓"
     return (
@@ -94,15 +102,29 @@ def _trade_usage(side: Side) -> str:
     )
 
 
-def _amount_trade_usage(side: Side) -> str:
-    command = "buya" if side == Side.BUY else "sella"
+def _amount_trade_usage(side: Side, at_market: bool = False) -> str:
+    command = ("buyn" if side == Side.BUY else "selln") if at_market else (
+        "buy" if side == Side.BUY else "sell"
+    )
+    command += "a"
+    price_arg = "" if at_market else "PRICE "
+    example_price = "" if at_market else "10.50 "
     action = "买入" if side == Side.BUY else "卖出"
     return (
-        f"用法：/{command} SYMBOL PRICE AMOUNT [Nx] [Ns]\n"
-        f"示例：/{command} 600000 10.50 10000 5x 100s\n"
+        f"用法：/{command} SYMBOL {price_arg}AMOUNT [Nx] [Ns]\n"
+        f"示例：/{command} 600000 {example_price}10000 5x 100s\n"
         f"按不超过人民币预算计算最大可{action}量（AMOUNT 为人民币）；"
         "100s、1s、01s、001s 分别表示最小 100、1、0.1、0.01 股"
     )
+
+
+def _with_placeholder_price(args: str | None) -> str | None:
+    """Reuse trade argument validation before looking up the actual quote."""
+    if not args:
+        return None
+    parts = args.split()
+    parts.insert(1, "1")
+    return " ".join(parts)
 
 
 @router.message(Command("quote"))
@@ -152,10 +174,23 @@ async def _cmd_trade(
     command: CommandObject,
     state: FSMContext,
     side: Side,
+    at_market: bool = False,
 ) -> None:
-    parsed = parse_trade_args(command.args)
+    args = _with_placeholder_price(command.args) if at_market else command.args
+    parsed = parse_trade_args(args)
     if parsed is None:
-        await message.reply(_trade_usage(side))
+        await message.reply(_trade_usage(side, at_market))
+        return
+    if at_market:
+        symbol, _price, qty, leverage = parsed
+        quote = await quotes.get_quote(symbol)
+        if quote is None or not math.isfinite(quote.price) or quote.price <= 0:
+            action = "买入" if side == Side.BUY else "卖出"
+            await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
+            return
+        await _cmd_trade_parsed(
+            message, state, side, (symbol, quote.price, qty, leverage), quote=quote
+        )
         return
     await _cmd_trade_parsed(message, state, side, parsed)
 
@@ -319,10 +354,12 @@ async def _cmd_amount_trade(
     command: CommandObject,
     state: FSMContext,
     side: Side,
+    at_market: bool = False,
 ) -> None:
-    parsed = parse_amount_trade_args(command.args)
+    args = _with_placeholder_price(command.args) if at_market else command.args
+    parsed = parse_amount_trade_args(args, calculate_qty=not at_market)
     if parsed is None:
-        await message.reply(_amount_trade_usage(side))
+        await message.reply(_amount_trade_usage(side, at_market))
         return
 
     symbol, price, amount, _qty, min_unit, leverage = parsed
@@ -330,7 +367,7 @@ async def _cmd_amount_trade(
     # CNY assets have a fixed 1:1 rate, so retain the fast rejection path for
     # an unaffordable order. Foreign assets must fetch their quote/rate first:
     # the same CNY budget buys a different quantity in HKD/USD.
-    if _qty == 0 and quotes.market_currency(symbol) == "CNY":
+    if not at_market and _qty == 0 and quotes.market_currency(symbol) == "CNY":
         action = "买入" if side == Side.BUY else "卖出"
         await message.reply(
             f"人民币预算 ¥{amount:,.2f} 不足：按现价 {price:g}、"
@@ -340,9 +377,11 @@ async def _cmd_amount_trade(
 
     quote = await quotes.get_quote(symbol)
     action = "买入" if side == Side.BUY else "卖出"
-    if quote is None or not quote.price:
+    if quote is None or not math.isfinite(quote.price) or quote.price <= 0:
         await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
         return
+    if at_market:
+        price = quote.price
 
     currency = quotes.quote_currency(quote)
     try:
@@ -359,6 +398,12 @@ async def _cmd_amount_trade(
             f"人民币预算 ¥{amount:,.2f} 不足：按现价 {price:g} {currency}、"
             f"最小单位 {format_qty(min_unit)} 股，无法{action} {symbol}"
         )
+        return
+
+    try:
+        models.validate_qty_units(qty)
+    except ValueError:
+        await message.reply("计算数量过大，请减少人民币预算")
         return
 
     await _cmd_trade_parsed(
@@ -398,6 +443,34 @@ async def cmd_sella(
     message: types.Message, command: CommandObject, state: FSMContext
 ) -> None:
     await _cmd_amount_trade(message, command, state, Side.SELL)
+
+
+@router.message(Command("buyn"))
+async def cmd_buyn(
+    message: types.Message, command: CommandObject, state: FSMContext
+) -> None:
+    await _cmd_trade(message, command, state, Side.BUY, at_market=True)
+
+
+@router.message(Command("selln"))
+async def cmd_selln(
+    message: types.Message, command: CommandObject, state: FSMContext
+) -> None:
+    await _cmd_trade(message, command, state, Side.SELL, at_market=True)
+
+
+@router.message(Command("buyna"))
+async def cmd_buyna(
+    message: types.Message, command: CommandObject, state: FSMContext
+) -> None:
+    await _cmd_amount_trade(message, command, state, Side.BUY, at_market=True)
+
+
+@router.message(Command("sellna"))
+async def cmd_sellna(
+    message: types.Message, command: CommandObject, state: FSMContext
+) -> None:
+    await _cmd_amount_trade(message, command, state, Side.SELL, at_market=True)
 
 
 @router.message(Command("close"))
