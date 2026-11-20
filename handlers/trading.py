@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 
+import intraday
 import models
 import quotes
 from .common import (
@@ -160,13 +161,40 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
         )
         return
 
-    await message.reply(
+    caption = (
         f"{quote.name} ({quote.symbol}) [{market_label}]\n"
         f"现价：{quote.price:.4f}  {sign}{change:.4f} "
         f"({sign}{change_pct:.2f}%)  {currency}\n"
         f"今开：{quote.open:.4f}  昨收：{quote.prev_close:.4f}\n"
         f"最高：{quote.high:.4f}  最低：{quote.low:.4f}"
     )
+
+    chart: bytes | None = None
+    try:
+        data = await intraday.get_intraday(quote)
+        if data is not None:
+            chart = intraday.render_chart(data)
+    except Exception:
+        logger.warning(
+            "unable to build intraday chart for %s", symbol, exc_info=True
+        )
+
+    if chart:
+        try:
+            await message.reply_photo(
+                types.BufferedInputFile(
+                    chart, filename=f"{quote.symbol}.png"
+                ),
+                caption=caption,
+            )
+            return
+        except TelegramAPIError:
+            logger.warning(
+                "unable to send intraday chart for %s",
+                symbol,
+                exc_info=True,
+            )
+    await message.reply(caption)
 
 
 async def _cmd_trade(
