@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 BOT_COMMANDS = [
-    BotCommand(command="quote", description="查实时行情和分时图：/quote SYMBOL"),
+    BotCommand(command="quote", description="查实时行情、分时和日K：/quote SYMBOL"),
     BotCommand(command="buy", description="买入：/buy SYMBOL PRICE QTY [Nx]"),
     BotCommand(command="buya", description="按人民币预算买入：/buya SYMBOL PRICE AMOUNT"),
     BotCommand(command="sell", description="卖出：/sell SYMBOL PRICE QTY [Nx]"),

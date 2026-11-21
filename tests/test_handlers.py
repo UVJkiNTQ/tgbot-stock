@@ -1,8 +1,11 @@
 import unittest
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import handlers
+import intraday
+import kline
 import models
 from handlers import (
     _parse_amount_trade_args,
@@ -565,6 +568,108 @@ class ReportCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不含浮盈", reply)
         self.assertIn("+20.00%", reply)
         self.assertIn("+¥100.00", reply)
+
+
+class QuoteCommandTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _quote() -> Quote:
+        return Quote(
+            symbol="600000", name="测试股票", price=10.1, open=10.0,
+            prev_close=10.0, high=10.2, low=9.9, market="A",
+        )
+
+    @staticmethod
+    def _intraday() -> intraday.Intraday:
+        points = [
+            intraday.IntradayPoint(
+                time=datetime(2026, 11, 20, 9, 30 + index),
+                price=10 + index * 0.01,
+                avg=10.0,
+                volume=100,
+            )
+            for index in range(10)
+        ]
+        return intraday.Intraday(
+            symbol="600000", market="A", prev_close=10.0, points=points
+        )
+
+    @staticmethod
+    def _daily() -> kline.DailySeries:
+        bars = [
+            kline.DailyBar(
+                day=date(2026, 10, 1 + index), open=10.0,
+                high=10.2, low=9.9, close=10.05, volume=100,
+            )
+            for index in range(10)
+        ]
+        return kline.DailySeries(
+            symbol="600000", market="A", bars=bars
+        )
+
+    async def test_quote_sends_intraday_and_daily_as_album(self) -> None:
+        message = SimpleNamespace(
+            reply=AsyncMock(),
+            reply_photo=AsyncMock(),
+            reply_media_group=AsyncMock(),
+        )
+        command = SimpleNamespace(args="600000")
+
+        with (
+            patch.object(
+                handlers.quotes, "get_quote", AsyncMock(
+                    return_value=self._quote()
+                )
+            ),
+            patch.object(
+                handlers.trading.intraday, "get_intraday", AsyncMock(
+                    return_value=self._intraday()
+                )
+            ),
+            patch.object(
+                handlers.trading.kline, "get_daily", AsyncMock(
+                    return_value=self._daily()
+                )
+            ),
+        ):
+            await handlers.cmd_quote(message, command)
+
+        message.reply.assert_not_awaited()
+        message.reply_photo.assert_not_awaited()
+        media = message.reply_media_group.await_args.kwargs["media"]
+        self.assertEqual(len(media), 2)
+        self.assertTrue(media[0].caption)
+        self.assertIsNone(media[1].caption)
+
+    async def test_quote_falls_back_to_text_without_charts(self) -> None:
+        message = SimpleNamespace(
+            reply=AsyncMock(),
+            reply_photo=AsyncMock(),
+            reply_media_group=AsyncMock(),
+        )
+        command = SimpleNamespace(args="600000")
+
+        with (
+            patch.object(
+                handlers.quotes, "get_quote", AsyncMock(
+                    return_value=self._quote()
+                )
+            ),
+            patch.object(
+                handlers.trading.intraday, "get_intraday", AsyncMock(
+                    return_value=None
+                )
+            ),
+            patch.object(
+                handlers.trading.kline, "get_daily", AsyncMock(
+                    return_value=None
+                )
+            ),
+        ):
+            await handlers.cmd_quote(message, command)
+
+        message.reply_media_group.assert_not_awaited()
+        message.reply_photo.assert_not_awaited()
+        message.reply.assert_awaited_once()
 
 
 if __name__ == "__main__":

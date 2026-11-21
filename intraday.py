@@ -7,8 +7,9 @@ from datetime import datetime
 
 import httpx
 import yfinance as yf  # type: ignore
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
+from chartstyle import fit_text, font as load_font, font_path
 from instrument import resolve_instrument
 
 
@@ -39,6 +40,7 @@ class Intraday:
     market: str
     prev_close: float
     points: list[IntradayPoint]
+    name: str = ""
 
 
 _intraday_cache: dict[tuple[str, str], tuple[Intraday, float]] = {}
@@ -215,16 +217,10 @@ async def get_intraday(quote) -> Intraday | None:
         market=quote.market,
         prev_close=prev_close,
         points=points,
+        name=getattr(quote, "name", "") or "",
     )
     _intraday_cache[key] = (data, now)
     return data
-
-
-def _font(size: int) -> ImageFont.ImageFont:
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
-        return ImageFont.load_default()
 
 
 def _dashed_line(
@@ -285,8 +281,8 @@ def render_chart(data: Intraday) -> bytes:
             price_bottom - y0
         )
 
-    small_font = _font(13)
-    title_font = _font(18)
+    small_font = load_font(13)
+    title_font = load_font(18)
 
     grid_color = "#e3e6ea"
     axis_color = "#9aa3ad"
@@ -392,12 +388,20 @@ def render_chart(data: Intraday) -> bytes:
     change_pct = (
         change / data.prev_close * 100 if data.prev_close else 0.0
     )
-    draw.text((x0, 12), data.symbol, fill="#222222", font=title_font)
+    title = (
+        f"{data.name}({data.symbol})"
+        if data.name and data.name != data.symbol and font_path()
+        else data.symbol
+    )
     summary = (
         f"{last_price:.{_price_decimals(last_price)}f}  "
         f"{change_pct:+.2f}%"
     )
     summary_width = draw.textlength(summary, font=title_font)
+    title = fit_text(
+        draw, title, title_font, x1 - summary_width - x0 - 16
+    )
+    draw.text((x0, 12), title, fill="#222222", font=title_font)
     draw.text(
         (x1 - summary_width, 12),
         summary,

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 from decimal import Decimal
@@ -8,6 +9,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 
 import intraday
+import kline
 import models
 import quotes
 from .common import (
@@ -169,30 +171,74 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
         f"最高：{quote.high:.4f}  最低：{quote.low:.4f}"
     )
 
-    chart: bytes | None = None
-    try:
-        data = await intraday.get_intraday(quote)
-        if data is not None:
-            chart = intraday.render_chart(data)
-    except Exception:
-        logger.warning(
-            "unable to build intraday chart for %s", symbol, exc_info=True
-        )
+    intraday_data, daily_data = await asyncio.gather(
+        intraday.get_intraday(quote),
+        kline.get_daily(quote),
+        return_exceptions=True,
+    )
 
-    if chart:
+    charts: list[tuple[str, bytes]] = []
+    for kind, result in (
+        ("intraday", intraday_data),
+        ("daily", daily_data),
+    ):
+        if isinstance(result, Exception):
+            logger.warning(
+                "unable to fetch %s chart for %s",
+                kind,
+                symbol,
+                exc_info=result,
+            )
+            continue
+        if result is None:
+            continue
+        try:
+            if kind == "daily":
+                png = kline.render_chart(result, quote.prev_close)
+            else:
+                png = intraday.render_chart(result)
+            charts.append((kind, png))
+        except Exception:
+            logger.warning(
+                "unable to render %s chart for %s",
+                kind,
+                symbol,
+                exc_info=True,
+            )
+
+    if len(charts) == 1:
+        kind, png = charts[0]
         try:
             await message.reply_photo(
                 types.BufferedInputFile(
-                    chart, filename=f"{quote.symbol}.png"
+                    png, filename=f"{quote.symbol}-{kind}.png"
                 ),
                 caption=caption,
             )
             return
         except TelegramAPIError:
             logger.warning(
-                "unable to send intraday chart for %s",
+                "unable to send %s chart for %s",
+                kind,
                 symbol,
                 exc_info=True,
+            )
+    elif charts:
+        media = [
+            types.InputMediaPhoto(
+                media=types.BufferedInputFile(
+                    png, filename=f"{quote.symbol}-{kind}.png"
+                ),
+                caption=caption if index == 0 else None,
+            )
+            for index, (kind, png) in enumerate(charts)
+        ]
+        try:
+            await message.reply_media_group(media=media)
+            return
+        except TelegramAPIError:
+            logger.warning(
+                "unable to send charts for %s", symbol, exc_info=True
             )
     await message.reply(caption)
 

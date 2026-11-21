@@ -28,7 +28,7 @@ python main.py
 
 | 命令 | 说明 | 示例 |
 |------|------|------|
-| `/quote SYMBOL` | 查询实时行情和当日分时图 | `/quote 600000` |
+| `/quote SYMBOL` | 查询实时行情、当日分时图和日K线图 | `/quote 600000` |
 | `/buy SYMBOL PRICE QTY [Nx]` | 买入或按指定杠杆回补空仓 | `/buy 600000 10.50 100 5x` |
 | `/sell SYMBOL PRICE QTY [Nx]` | 卖出或按指定杠杆建立空仓 | `/sell 600000 11.00 100 5x` |
 | `/buya SYMBOL PRICE AMOUNT [Nx] [Ns]` | 按人民币预算计算不超预算的最大买入量 | `/buya 600000 10.50 10000 5x 100s` |
@@ -65,6 +65,8 @@ python main.py
 - 美股：Yahoo Finance
 - 场外基金：天天基金（估算净值）
 - `/quote` 附当日分时图：A股/北交所/港股用腾讯分钟接口，美股用 Yahoo Finance 分钟数据；基金不提供分时图。分时图获取或发送失败时自动退回文字行情
+- `/quote` 同时附日K线图（默认展示最近约90个交易日）：A股用腾讯前复权日K，港股用腾讯日K，北交所用新浪日K，美股用 Yahoo Finance 日线；日K获取失败时只发送分时图，全部图表失败时退回文字行情
+- 图表标题按“名称(代码)”显示；中文名称需要 CJK 字体（如文泉驿微米黑、Noto Sans CJK），程序会自动搜索系统/用户字体目录，也可用环境变量 `BOT_CHART_FONT=/path/to/font.ttc` 指定；找不到 CJK 字体时标题只显示代码
 - 行情按“证券代码 + 市场”分别缓存 3 秒，避免同代码股票与基金串线
 - `/buyn`、`/selln`、`/buyna`、`/sellna` 自动使用与 `/quote` 同源的行情价格（含相同缓存），按确认单价格记录；确认、取消、杠杆与预算规则均与原命令相同，`/buyn`、`/selln` 也支持 `ALL [Nx]`
 - 买入/卖出价格偏离现价 >5% 时需二次确认，按钮仅有发起人本人可操作
@@ -94,3 +96,5 @@ python main.py
 - `models/`：数据访问包；`__init__.py` 暴露稳定接口，领域类型、数据库迁移和交易仓储分别位于 `types.py`、`schema.py` 和 `repository.py`
 - `pnl.py`：持仓成本、盈亏与排行榜计算
 - `quotes.py`：证券代码识别、行情和汇率获取
+- `intraday.py` / `kline.py`：当日分时与日K数据获取及图表渲染
+- `chartstyle.py`：图表字体查找、中文标题排版辅助
