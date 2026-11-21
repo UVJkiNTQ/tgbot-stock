@@ -45,6 +45,7 @@ class RealizedPnl:
     realized_pnl_cny: float
     closed_cost_cny: float
     closed_margin_cny: float = 0.0
+    name: str = ""
 
     @property
     def is_foreign(self) -> bool:
@@ -199,6 +200,36 @@ def calculate_cost_basis(trades: list[Trade]) -> tuple[float, float]:
     return avg_cost, avg_cost_cny
 
 
+_realized_name_cache: dict[tuple[str, str], str] = {}
+
+
+async def populate_realized_names(result: UserPnl) -> None:
+    """Fill names for closed buckets so reports can show 名称(代码)."""
+    missing: dict[tuple[str, str], tuple[str, str]] = {}
+    for item in result.realized:
+        key = (quotes.normalize_symbol(item.symbol), item.market)
+        cached = _realized_name_cache.get(key)
+        if cached:
+            item.name = cached
+        else:
+            missing.setdefault(key, (item.symbol, item.market))
+
+    if not missing:
+        return
+
+    try:
+        qmap = await quotes.get_quotes(list(missing.values()))
+    except Exception:
+        return
+
+    for item in result.realized:
+        key = (quotes.normalize_symbol(item.symbol), item.market)
+        quote = qmap.get(key)
+        if quote is not None and quote.name:
+            item.name = quote.name
+            _realized_name_cache[key] = quote.name
+
+
 async def compute_user_pnl(
     user_id: int, include_unrealized: bool = True
 ) -> UserPnl:
@@ -284,6 +315,7 @@ async def compute_user_pnl(
 
         name = q.name
         cur_price = q.price
+        _realized_name_cache[(quotes.normalize_symbol(sym), market)] = name
 
         cur_price_cny = cur_price * cur_rate
         mv = net_qty * cur_price / models.QTY_SCALE

@@ -497,5 +497,75 @@ class MarketIdentityPnlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_market["FUND"].current_price, 1.37)
 
 
+class RealizedNameTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        pnl._realized_name_cache.clear()
+
+    @staticmethod
+    def _result() -> pnl.UserPnl:
+        item = pnl.RealizedPnl(
+            symbol="00700",
+            market="HK",
+            leverage=1.0,
+            currency="HKD",
+            realized_pnl=1.0,
+            realized_pnl_cny=1.0,
+            closed_cost_cny=1.0,
+        )
+        return pnl.UserPnl(
+            user_id=1,
+            username="tester",
+            positions=[],
+            total_unrealized_pnl_cny=0.0,
+            total_market_value_cny=0.0,
+            total_cost_cny=0.0,
+            realized=[item],
+        )
+
+    async def test_realized_names_are_filled_from_quotes(self) -> None:
+        result = self._result()
+        quote = Quote(
+            symbol="00700",
+            name="腾讯控股",
+            price=1.0,
+            open=1.0,
+            prev_close=1.0,
+            high=1.0,
+            low=1.0,
+            market="HK",
+        )
+        with patch.object(
+            pnl.quotes,
+            "get_quotes",
+            AsyncMock(return_value={("00700", "HK"): quote}),
+        ):
+            await pnl.populate_realized_names(result)
+
+        self.assertEqual(result.realized[0].name, "腾讯控股")
+        self.assertEqual(
+            pnl._realized_name_cache[("00700", "HK")], "腾讯控股"
+        )
+
+    async def test_missing_quote_keeps_name_empty(self) -> None:
+        result = self._result()
+        with patch.object(
+            pnl.quotes, "get_quotes", AsyncMock(return_value={})
+        ):
+            await pnl.populate_realized_names(result)
+
+        self.assertEqual(result.realized[0].name, "")
+
+    async def test_cached_name_skips_quote_lookup(self) -> None:
+        result = self._result()
+        pnl._realized_name_cache[("00700", "HK")] = "腾讯控股"
+        with patch.object(
+            pnl.quotes, "get_quotes", AsyncMock()
+        ) as get_quotes:
+            await pnl.populate_realized_names(result)
+
+        get_quotes.assert_not_awaited()
+        self.assertEqual(result.realized[0].name, "腾讯控股")
+
+
 if __name__ == "__main__":
     unittest.main()

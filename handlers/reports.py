@@ -35,13 +35,18 @@ def format_trade_time(trade_ts: str) -> str:
     return timestamp.astimezone(_DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _instrument_label(name: str, symbol: str) -> str:
+    """Show 名称(代码) when a distinct name is known, else just the code."""
+    return f"{name}({symbol})" if name and name != symbol else symbol
+
+
 def position_lines(result: pnl.UserPnl) -> list[str]:
     lines = [f"{result.username} 持仓汇总：\n"]
     for position in result.positions:
         direction = "  [空]" if position.qty < 0 else ""
         if not position.quote_available:
             lines.append(
-                f"{position.name} ({position.symbol}) × "
+                f"{_instrument_label(position.name, position.symbol)} × "
                 f"{format_qty(position.qty)}{direction}"
                 f"  [{position.currency}] "
                 f"[{format_leverage(position.leverage)}]\n"
@@ -56,7 +61,7 @@ def position_lines(result: pnl.UserPnl) -> list[str]:
 
         if position.is_foreign:
             lines.append(
-                f"{position.name} ({position.symbol}) × "
+                f"{_instrument_label(position.name, position.symbol)} × "
                 f"{format_qty(position.qty)}{direction}"
                 f"  [{position.currency}] "
                 f"[{format_leverage(position.leverage)}]\n"
@@ -73,7 +78,7 @@ def position_lines(result: pnl.UserPnl) -> list[str]:
             )
         else:
             lines.append(
-                f"{position.name} ({position.symbol}) × "
+                f"{_instrument_label(position.name, position.symbol)} × "
                 f"{format_qty(position.qty)}{direction}"
                 f"  [{format_leverage(position.leverage)}]\n"
                 f"  {entry_label} {position.avg_cost:.4f}  "
@@ -135,6 +140,9 @@ async def cmd_pnl(message: types.Message) -> None:
         await message.reply("你还没有交易记录，无法计算损益")
         return
 
+    if result.realized:
+        await pnl.populate_realized_names(result)
+
     lines = [f"{result.username} 损益汇总：\n"]
     lines.append("已实现收益：")
     if result.realized:
@@ -158,7 +166,8 @@ async def cmd_pnl(message: types.Message) -> None:
                     f"({sign}{return_pct:.2f}%)"
                 )
             lines.append(
-                f"{item.symbol} [{format_leverage(item.leverage)}]  {detail}"
+                f"{_instrument_label(item.name, item.symbol)} "
+                f"[{format_leverage(item.leverage)}]  {detail}"
             )
     else:
         lines.append("暂无已平仓交易")
@@ -170,7 +179,8 @@ async def cmd_pnl(message: types.Message) -> None:
                 direction = " [空]" if position.qty < 0 else ""
                 leverage = f" [{format_leverage(position.leverage)}]"
                 lines.append(
-                    f"{position.symbol}{direction}{leverage}  "
+                    f"{_instrument_label(position.name, position.symbol)}"
+                    f"{direction}{leverage}  "
                     "⚠️ 行情不可用，暂不计入浮盈"
                 )
                 continue
@@ -181,7 +191,8 @@ async def cmd_pnl(message: types.Message) -> None:
             sign_orig = "+" if position.unrealized_pnl >= 0 else ""
             if position.is_foreign:
                 lines.append(
-                    f"{position.symbol}{direction}{leverage}  "
+                    f"{_instrument_label(position.name, position.symbol)}"
+                    f"{direction}{leverage}  "
                     f"{sign_orig}{position.unrealized_pnl:.2f}"
                     f" {position.currency}"
                     f"  (≈¥{sign}{position.unrealized_pnl_cny:.2f}, "
@@ -189,7 +200,8 @@ async def cmd_pnl(message: types.Message) -> None:
                 )
             else:
                 lines.append(
-                    f"{position.symbol}{direction}{leverage}  "
+                    f"{_instrument_label(position.name, position.symbol)}"
+                    f"{direction}{leverage}  "
                     f"{sign_orig}{position.unrealized_pnl:.2f}"
                     f" ({sign_orig}{position.unrealized_pnl_pct:.2f}%)"
                 )
