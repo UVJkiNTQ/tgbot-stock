@@ -2,27 +2,19 @@
 
 群友股票买卖记录、持仓查看、损益计算，接入实时行情。
 
-## 安装
+## 编译与运行（Rust 版）
 
 ```bash
-pip install -r requirements.txt
-```
-
-## 配置
-
-设置环境变量：
-
-```powershell
-$env:TG_BOT_TOKEN = "你的Bot Token"
-python main.py
-```
-
-或 Linux/Mac：
-
-```bash
+cargo build --release
 export TG_BOT_TOKEN="你的Bot Token"
-python main.py
+./target/release/tgbot-stock
 ```
+
+可选环境变量：
+- `BOT_DB_PATH`：SQLite 数据库路径（默认 `data/trades.db`，与 Python 版 v3 数据库完全兼容）
+- `BOT_TIMEZONE`：`/trades` 展示时区（默认 `Asia/Shanghai`）
+- `BOT_CHART_FONT`：手动指定中文字体路径（`.ttc` / `.ttf` / `.otf`）
+- `TG_API_BASE`：自定义 Telegram Bot API 地址（默认 `https://api.telegram.org`）
 
 ## 命令
 
@@ -99,11 +91,11 @@ python main.py
 
 ## 代码结构
 
-- `telegram.py`：基于 `httpx` 的轻量 Telegram Bot API 客户端、命令/回调路由与有界内存 FSM
-- `http_client.py`：共享 `httpx.AsyncClient`、有界 TTL 缓存与 Yahoo Finance v8 接口封装
-- `handlers/`：Bot 路由包；`__init__.py` 负责组合路由，命令实现按 `system.py`、`trading.py`、`callbacks.py`、`reports.py` 和 `common.py` 分层
-- `models/`：数据访问包；`__init__.py` 暴露稳定接口，连接复用、领域类型、数据库迁移和交易仓储分别位于 `connection.py`、`types.py`、`schema.py` 和 `repository.py`
-- `pnl.py`：持仓成本、盈亏与排行榜计算
-- `quotes.py`：证券代码识别、行情和汇率获取
-- `intraday.py` / `kline.py`：当日分时与日K数据获取及图表渲染
-- `chartstyle.py`：图表字体查找、中文标题排版辅助
+- `src/main.rs` / `src/config.rs`：程序入口、环境变量配置与长轮询主循环
+- `src/telegram.rs`：基于 `reqwest`（`rustls`）的轻量 Telegram Bot API 客户端与有界内存 FSM
+- `src/http_client.rs` / `src/cache.rs`：共享 HTTP 连接池、Yahoo Finance v8 封装与有界 TTL 缓存
+- `src/handlers/`：命令与回调路由（`system.rs`、`trading.rs`、`callbacks.rs`、`reports.rs`、`common.rs`）
+- `src/models/`：SQLite 数据访问层（`types.rs`、`schema.rs`、`repository.rs`）
+- `src/pnl.rs`：持仓成本、盈亏与排行榜计算
+- `src/quotes.rs` / `src/instrument.rs` / `src/instrument_search.rs`：证券代码识别、实时行情、汇率与 `/find` 搜索
+- `src/intraday.rs` / `src/kline.rs` / `src/chartstyle.rs`：分时/日 K 数据获取及 `tiny-skia` + `ab_glyph` + `mmap` 字体图表渲染

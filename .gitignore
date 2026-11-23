@@ -1,6 +1,7 @@
 __pycache__/
 .venv/
 data/
+target/
 .env
 *.pyc
 *.db
