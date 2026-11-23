@@ -1,9 +1,8 @@
 import asyncio
 from functools import wraps
+import weakref
 
-from aiogram import F, Router
-from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
+from telegram import CallbackPrefix, CallbackQuery, FSMContext, Router
 
 import models
 import quotes
@@ -18,7 +17,9 @@ from models import Side
 
 
 router = Router(name="trade_callbacks")
-_confirmation_locks: dict[int, asyncio.Lock] = {}
+_confirmation_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _confirmation_lock(user_id: int) -> asyncio.Lock:
@@ -28,7 +29,11 @@ def _confirmation_lock(user_id: int) -> asyncio.Lock:
     two fast callback updates can both read the same confirmation snapshot
     before either one clears it.
     """
-    return _confirmation_locks.setdefault(user_id, asyncio.Lock())
+    lock = _confirmation_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _confirmation_locks[user_id] = lock
+    return lock
 
 
 def serialized_confirmation(handler):
@@ -90,7 +95,7 @@ def _confirmed_trade_lines(trades: list[models.Trade]) -> str:
     return "\n".join(lines)
 
 
-@router.callback_query(F.data.startswith("buy_ok"))
+@router.callback_query(CallbackPrefix("buy_ok"))
 @serialized_confirmation
 async def on_buy_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
@@ -129,7 +134,7 @@ async def on_buy_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("sell_ok"))
+@router.callback_query(CallbackPrefix("sell_ok"))
 @serialized_confirmation
 async def on_sell_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
@@ -168,7 +173,7 @@ async def on_sell_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("close_ok"))
+@router.callback_query(CallbackPrefix("close_ok"))
 @serialized_confirmation
 async def on_close_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
@@ -198,7 +203,7 @@ async def on_close_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("cancel"))
+@router.callback_query(CallbackPrefix("cancel"))
 @serialized_confirmation
 async def on_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     if not await verify_confirm_owner(callback):

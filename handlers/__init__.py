@@ -4,7 +4,7 @@ The command implementations are split by responsibility so this module stays
 stable as the public entry point used by ``main.py``.
 """
 
-from aiogram import Router
+from telegram import Router
 
 import models
 import pnl
@@ -36,6 +36,7 @@ from .trading import (
     cmd_buyn,
     cmd_buyna,
     cmd_close,
+    cmd_find,
     cmd_quote,
     cmd_sell,
     cmd_sella,
@@ -99,6 +100,7 @@ __all__ = [
     "cmd_buyna",
     "cmd_close",
     "cmd_delete",
+    "cmd_find",
     "cmd_help",
     "cmd_leaderboard",
     "cmd_pnl",

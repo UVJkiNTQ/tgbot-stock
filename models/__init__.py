@@ -1,6 +1,7 @@
 """Public data API kept stable while implementation lives in focused modules."""
 
 import config
+from .connection import close_db
 from .repository import (
     delete_trade,
     delete_trades,
@@ -44,6 +45,7 @@ __all__ = [
     "Side",
     "Trade",
     "TradePlan",
+    "close_db",
     "config",
     "delete_trade",
     "delete_trades",

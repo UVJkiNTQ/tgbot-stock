@@ -5,6 +5,7 @@ from intraday import (
     Intraday,
     IntradayPoint,
     _parse_tencent_rows,
+    _parse_yahoo_chart,
     render_chart,
 )
 
@@ -43,6 +44,26 @@ class TencentMinuteParseTests(unittest.TestCase):
         self.assertEqual(
             _parse_tencent_rows(["0930 10.0 1"], "not-a-date"), []
         )
+
+
+class YahooMinuteParseTests(unittest.TestCase):
+    def test_parses_v8_chart_minutes_with_vwap(self) -> None:
+        result = {
+            "meta": {"exchangeTimezoneName": "America/New_York"},
+            "timestamp": [1763562600, 1763562660, 1763562720],
+            "indicators": {
+                "quote": [
+                    {
+                        "close": [10.0, None, 12.0],
+                        "volume": [100, 50, 300],
+                    }
+                ]
+            },
+        }
+        points = _parse_yahoo_chart(result)
+        self.assertEqual([p.price for p in points], [10.0, 12.0])
+        self.assertEqual([p.volume for p in points], [100.0, 300.0])
+        self.assertAlmostEqual(points[1].avg, (10.0 * 100 + 12.0 * 300) / 400)
 
 
 class RenderChartTests(unittest.TestCase):

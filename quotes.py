@@ -1,19 +1,21 @@
 import asyncio
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
 
 import httpx
-import yfinance as yf  # type: ignore
 
 import config
+from http_client import cache_set, fetch_yahoo_chart, get_client
 from instrument import (
     detect_market,
     market_candidates,
     normalize_symbol,
     parse_symbol,
     resolve_instrument,
+    yahoo_symbol,
 )
 
 
@@ -26,11 +28,16 @@ class Quote:
     prev_close: float
     high: float
     low: float
-    market: str  # "A", "HK", "US", "FUND", "BSE"
+    market: str  # "A", "HK", "US", "FUND", "BSE", "JP"
 
 
 MARKET_CURRENCY = {
-    "A": "CNY", "HK": "HKD", "US": "USD", "FUND": "CNY", "BSE": "CNY"
+    "A": "CNY",
+    "HK": "HKD",
+    "US": "USD",
+    "FUND": "CNY",
+    "BSE": "CNY",
+    "JP": "JPY",
 }
 
 InstrumentKey = tuple[str, str]
@@ -39,6 +46,8 @@ InstrumentKey = tuple[str, str]
 _quote_cache: dict[InstrumentKey, tuple[Quote, float]] = {}
 _rate_cache: dict[str, tuple[float, float]] = {}
 RATE_CACHE_TTL = 600.0  # 10 min
+_QUOTE_CACHE_MAX = 512
+_RATE_CACHE_MAX = 64
 
 
 class RateUnavailableError(RuntimeError):
@@ -72,44 +81,44 @@ def _sina_list(symbol: str, market: str | None = None) -> str:
 async def _fetch_funds(symbols: list[str]) -> dict[str, Quote]:
     """Fetch fund NAV from Eastmoney's pingzhongdata (unit net value history)."""
     results: dict[str, Quote] = {}
-    async with httpx.AsyncClient(
-        timeout=10, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com"}
-    ) as client:
-        for sym in symbols:
-            try:
-                resp = await client.get(
-                    f"https://fund.eastmoney.com/pingzhongdata/{sym}.js"
-                )
-                resp.raise_for_status()
-                text = resp.content.decode("utf-8", errors="replace")
+    client = get_client()
+    headers = {"Referer": "https://fund.eastmoney.com"}
+    for sym in symbols:
+        try:
+            resp = await client.get(
+                f"https://fund.eastmoney.com/pingzhongdata/{sym}.js",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            text = resp.content.decode("utf-8", errors="replace")
 
-                name_m = re.search(r'fS_name\s*=\s*"([^"]*)"', text)
-                trend_m = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text)
-                if not name_m or not trend_m:
-                    continue
-                name = name_m.group(1).strip()
-                trend = json.loads(trend_m.group(1))
-                if not trend:
-                    continue
-
-                last = trend[-1]
-                prev = trend[-2] if len(trend) >= 2 else last
-                price = float(last.get("y") or 0)
-                prev_close = float(prev.get("y") or 0)
-                if not name or price <= 0:
-                    continue
-                results[sym] = Quote(
-                    symbol=sym,
-                    name=name,
-                    price=price,
-                    open=prev_close,
-                    prev_close=prev_close,
-                    high=max(price, prev_close),
-                    low=min(price, prev_close),
-                    market="FUND",
-                )
-            except Exception:
+            name_m = re.search(r'fS_name\s*=\s*"([^"]*)"', text)
+            trend_m = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text)
+            if not name_m or not trend_m:
                 continue
+            name = name_m.group(1).strip()
+            trend = json.loads(trend_m.group(1))
+            if not trend:
+                continue
+
+            last = trend[-1]
+            prev = trend[-2] if len(trend) >= 2 else last
+            price = float(last.get("y") or 0)
+            prev_close = float(prev.get("y") or 0)
+            if not name or price <= 0:
+                continue
+            results[sym] = Quote(
+                symbol=sym,
+                name=name,
+                price=price,
+                open=prev_close,
+                prev_close=prev_close,
+                high=max(price, prev_close),
+                low=min(price, prev_close),
+                market="FUND",
+            )
+        except Exception:
+            continue
     return results
 
 
@@ -167,11 +176,11 @@ async def _fetch_sina(
 
     url = f"https://hq.sinajs.cn/list={','.join(sina_codes)}"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                url, headers={"Referer": "https://finance.sina.com.cn"}
-            )
-            resp.raise_for_status()
+        client = get_client()
+        resp = await client.get(
+            url, headers={"Referer": "https://finance.sina.com.cn"}
+        )
+        resp.raise_for_status()
     except httpx.HTTPError:
         return results
 
@@ -195,40 +204,130 @@ async def _fetch_sina(
     return results
 
 
-async def _fetch_us(symbols: list[str]) -> dict[str, Quote]:
-    def fetch_one(sym: str) -> Quote | None:
+def _first_finite(values: list | None) -> float:
+    if not isinstance(values, list):
+        return 0.0
+    for item in reversed(values):
+        if item is None:
+            continue
         try:
-            ticker = yf.Ticker(sym)
-            info = ticker.fast_info
-            price = (
-                info.get("lastPrice") or info.get("regularMarketPrice") or 0.0
+            num = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(num) and num > 0:
+            return num
+    return 0.0
+
+
+def _parse_yahoo_chart_quote(
+    sym: str, market: str, result: dict
+) -> Quote | None:
+    meta = result.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    price = float(meta.get("regularMarketPrice") or 0.0)
+    if not math.isfinite(price) or price <= 0:
+        return None
+
+    prev_close = float(
+        meta.get("chartPreviousClose")
+        or meta.get("previousClose")
+        or 0.0
+    )
+    indicators = result.get("indicators") or {}
+    quote_nodes = indicators.get("quote") or []
+    quote_node = (
+        quote_nodes[0]
+        if isinstance(quote_nodes, list) and quote_nodes and isinstance(quote_nodes[0], dict)
+        else {}
+    )
+    open_price = float(
+        meta.get("regularMarketOpen")
+        or _first_finite(quote_node.get("open"))
+        or 0.0
+    )
+    high = float(
+        meta.get("regularMarketDayHigh")
+        or _first_finite(quote_node.get("high"))
+        or 0.0
+    )
+    low = float(
+        meta.get("regularMarketDayLow")
+        or _first_finite(quote_node.get("low"))
+        or 0.0
+    )
+    if market == "JP":
+        name = str(
+            meta.get("longName") or meta.get("shortName") or sym
+        ).strip()
+    else:
+        name = str(
+            meta.get("shortName")
+            or meta.get("longName")
+            or meta.get("symbol")
+            or yahoo_symbol(sym, market)
+        ).strip()
+
+    return Quote(
+        symbol=sym,
+        name=name or sym,
+        price=price,
+        open=open_price,
+        prev_close=prev_close,
+        high=high,
+        low=low,
+        market=market,
+    )
+
+
+async def _fetch_yahoo(
+    symbols: list[str], market: str = "US"
+) -> dict[str, Quote]:
+    async def fetch_one(sym: str) -> Quote | None:
+        try:
+            result = await fetch_yahoo_chart(
+                yahoo_symbol(sym, market), range_="1d", interval="1d"
             )
-            prev_close = (
-                info.get("previousClose")
-                or info.get("regularMarketPreviousClose")
-                or 0.0
-            )
-            return Quote(
-                symbol=sym,
-                name=ticker.ticker,
-                price=float(price),
-                open=float(info.get("open") or 0.0),
-                prev_close=float(prev_close),
-                high=float(info.get("dayHigh") or 0.0),
-                low=float(info.get("dayLow") or 0.0),
-                market="US",
-            )
+            if result is None:
+                return None
+            return _parse_yahoo_chart_quote(sym, market, result)
         except Exception:
             return None
 
     results: dict[str, Quote] = {}
-    fetched = await asyncio.gather(
-        *(asyncio.to_thread(fetch_one, sym) for sym in symbols)
-    )
+    fetched = await asyncio.gather(*(fetch_one(sym) for sym in symbols))
     for sym, quote in zip(symbols, fetched):
         if quote is not None:
             results[sym] = quote
     return results
+
+
+def japan_alternative_code(symbol: str) -> str | None:
+    """Return a Japanese code for an unresolved four-digit HK-style symbol.
+
+    A bare four-digit code is historically treated as Hong Kong and padded to
+    five digits.  When that quote is missing, deriving the original four-digit
+    code lets callers offer ``7203.JP`` as a disambiguation without changing
+    the default meaning of ``7203``.
+    """
+    base, forced = parse_symbol(symbol)
+    if forced is not None:
+        return None
+    if (
+        len(base) == 5
+        and base.startswith("0")
+        and base[1] != "0"
+        and base.isdigit()
+    ):
+        return base[1:]
+    return None
+
+
+async def get_japan_alternative(symbol: str) -> Quote | None:
+    code = japan_alternative_code(symbol)
+    if code is None:
+        return None
+    return await get_quote(f"{code}.JP")
 
 
 async def get_quote(symbol: str, market: str | None = None) -> Quote | None:
@@ -246,6 +345,7 @@ async def get_quotes(
     a_syms: list[str] = []
     hk_syms: list[str] = []
     us_syms: list[str] = []
+    jp_syms: list[str] = []
     fund_syms: list[str] = []
     bse_syms: list[str] = []
 
@@ -269,6 +369,8 @@ async def get_quotes(
             bse_syms.append(base)
         elif market == "US":
             us_syms.append(base)
+        elif market == "JP":
+            jp_syms.append(base)
         elif market == "HK":
             hk_syms.append(base)
         else:
@@ -287,7 +389,14 @@ async def get_quotes(
         now2 = time.time()
         for sym, q in sina_results.items():
             key = (sym, market)
-            _quote_cache[key] = (q, now2)
+            cache_set(
+                _quote_cache,
+                key,
+                q,
+                now2,
+                ttl=config.QUOTE_CACHE_TTL,
+                max_size=_QUOTE_CACHE_MAX,
+            )
             results[key] = q
         if market == "A":
             for sym in symbols:
@@ -301,18 +410,47 @@ async def get_quotes(
         now2 = time.time()
         for sym, q in fund_results.items():
             key = (sym, "FUND")
-            _quote_cache[key] = (q, now2)
+            cache_set(
+                _quote_cache,
+                key,
+                q,
+                now2,
+                ttl=config.QUOTE_CACHE_TTL,
+                max_size=_QUOTE_CACHE_MAX,
+            )
             # A same-code fund discovered while probing a missing A quote is
             # cached under its own identity, never returned as the A asset.
             if key in keys:
                 results[key] = q
 
     if us_syms:
-        us_results = await _fetch_us(us_syms)
+        us_results = await _fetch_yahoo(us_syms, "US")
         now2 = time.time()
         for sym, q in us_results.items():
             key = (sym, "US")
-            _quote_cache[key] = (q, now2)
+            cache_set(
+                _quote_cache,
+                key,
+                q,
+                now2,
+                ttl=config.QUOTE_CACHE_TTL,
+                max_size=_QUOTE_CACHE_MAX,
+            )
+            results[key] = q
+
+    if jp_syms:
+        jp_results = await _fetch_yahoo(jp_syms, "JP")
+        now2 = time.time()
+        for sym, q in jp_results.items():
+            key = (sym, "JP")
+            cache_set(
+                _quote_cache,
+                key,
+                q,
+                now2,
+                ttl=config.QUOTE_CACHE_TTL,
+                max_size=_QUOTE_CACHE_MAX,
+            )
             results[key] = q
 
     return results
@@ -330,22 +468,29 @@ async def get_rate(currency: str) -> float:
         return cached[0]
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"https://open.er-api.com/v6/latest/{currency}"
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("result") != "success" or data.get("base_code") != currency:
-                raise ValueError(f"invalid exchange-rate response for {currency}")
-            rate = float(data["rates"]["CNY"])
-            if rate <= 0:
-                raise ValueError(f"invalid exchange rate for {currency}")
+        client = get_client()
+        resp = await client.get(
+            f"https://open.er-api.com/v6/latest/{currency}"
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("result") != "success" or data.get("base_code") != currency:
+            raise ValueError(f"invalid exchange-rate response for {currency}")
+        rate = float(data["rates"]["CNY"])
+        if rate <= 0:
+            raise ValueError(f"invalid exchange rate for {currency}")
     except Exception as exc:
         if cached:
             return cached[0]
         raise RateUnavailableError(f"unable to fetch {currency}/CNY rate") from exc
-    _rate_cache[currency] = (rate, now)
+    cache_set(
+        _rate_cache,
+        currency,
+        rate,
+        now,
+        ttl=RATE_CACHE_TTL,
+        max_size=_RATE_CACHE_MAX,
+    )
     return rate
 
 

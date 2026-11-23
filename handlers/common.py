@@ -1,12 +1,13 @@
 import math
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
+from telegram import (
     CallbackQuery,
+    FSMContext,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    State,
+    StatesGroup,
 )
 
 import models
@@ -15,6 +16,13 @@ import quotes
 
 PRICE_DEVIATION_PCT = 5.0
 _ACTION_LABELS = {"buy": "买入", "sell": "卖出", "close": "平仓"}
+_QUALIFIED_SUFFIXES = (".F", ".A", ".US", ".HK", ".BSE", ".BJ", ".JP")
+
+
+def _is_qualified_symbol(raw: str) -> bool:
+    return raw.endswith(_QUALIFIED_SUFFIXES) or (
+        raw.startswith("JP") and raw[2:].isdigit()
+    )
 
 
 class TradeConfirm(StatesGroup):
@@ -164,7 +172,7 @@ def parse_amount_trade_args(
             models.validate_qty_units(qty)
 
         raw_symbol = parts[0].upper()
-        if raw_symbol.endswith((".F", ".A", ".US", ".HK", ".BSE", ".BJ")):
+        if _is_qualified_symbol(raw_symbol):
             symbol = raw_symbol
         else:
             symbol = quotes.normalize_symbol(raw_symbol)
@@ -195,7 +203,7 @@ def parse_trade_args(
         leverage = parse_leverage(parts[3]) if len(parts) == 4 else None
 
         raw_symbol = parts[0].upper()
-        if raw_symbol.endswith((".F", ".A", ".US", ".HK", ".BSE", ".BJ")):
+        if _is_qualified_symbol(raw_symbol):
             symbol = raw_symbol
         else:
             symbol = quotes.normalize_symbol(raw_symbol)
@@ -217,6 +225,23 @@ def parse_close_args(args: str) -> tuple[str, float] | None:
         return None
     symbol, price, _qty, _leverage = parsed
     return symbol, price
+
+
+async def quote_missing_text(symbol: str) -> str:
+    """Suggest an explicit Japanese symbol when a HK-like quote is missing."""
+    alternative = await quotes.get_japan_alternative(symbol)
+    if (
+        alternative is None
+        or not math.isfinite(alternative.price)
+        or alternative.price <= 0
+    ):
+        return ""
+    currency = quotes.quote_currency(alternative)
+    return (
+        f"\n疑似日本股票：{alternative.name} "
+        f"({alternative.symbol}) {alternative.price:.2f} {currency}，"
+        f"请改用 {alternative.symbol}.JP 重试。"
+    )
 
 
 async def verify_confirm_owner(

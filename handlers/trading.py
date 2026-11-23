@@ -1,14 +1,20 @@
 import asyncio
+import html
 import logging
 import math
 from decimal import Decimal
 
-from aiogram import Router, types
-from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandObject
-from aiogram.fsm.context import FSMContext
+import telegram as types
+from telegram import (
+    Command,
+    CommandObject,
+    FSMContext,
+    Router,
+    TelegramAPIError,
+)
 
 import intraday
+import instrument_search
 import kline
 import models
 import quotes
@@ -24,12 +30,22 @@ from .common import (
     parse_close_args,
     parse_trade_args,
     price_deviation,
+    quote_missing_text,
 )
 from models import PositionEntry, Side
 
 
 router = Router(name="trade_commands")
 logger = logging.getLogger(__name__)
+
+MARKET_LABELS = {
+    "A": "A股",
+    "HK": "港股",
+    "US": "美股",
+    "FUND": "基金",
+    "BSE": "北交所",
+    "JP": "日股",
+}
 
 
 def _is_closed_by(entry: PositionEntry, side: Side) -> bool:
@@ -138,7 +154,9 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
     symbol = command.args.strip().upper()
     quote = await quotes.get_quote(symbol)
     if quote is None or quote.price == 0:
-        await message.reply(f"未找到 {symbol} 的行情数据")
+        await message.reply(
+            f"未找到 {symbol} 的行情数据" + await quote_missing_text(symbol)
+        )
         return
 
     change = quote.price - quote.prev_close
@@ -146,13 +164,7 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
         change / quote.prev_close * 100 if quote.prev_close else 0.0
     )
     sign = "+" if change >= 0 else ""
-    market_label = {
-        "A": "A股",
-        "HK": "港股",
-        "US": "美股",
-        "FUND": "基金",
-        "BSE": "北交所",
-    }.get(quote.market, quote.market)
+    market_label = MARKET_LABELS.get(quote.market, quote.market)
     currency = quotes.quote_currency(quote)
 
     if quote.market == "FUND":
@@ -243,6 +255,51 @@ async def cmd_quote(message: types.Message, command: CommandObject) -> None:
     await message.reply(caption)
 
 
+@router.message(Command("find"))
+async def cmd_find(message: types.Message, command: CommandObject) -> None:
+    query = (command.args or "").strip()
+    if not query:
+        await message.reply(
+            "用法：/find 关键词\n示例：/find wacom 或 /find 腾讯"
+        )
+        return
+    if len(query) > instrument_search.MAX_QUERY_LENGTH:
+        await message.reply(
+            f"关键词过长，请控制在 {instrument_search.MAX_QUERY_LENGTH} 个字符内"
+        )
+        return
+
+    try:
+        results = await instrument_search.search_instruments(query)
+    except instrument_search.SearchUnavailableError:
+        await message.reply(
+            "搜索服务暂时不可用，请稍后再试，或直接输入代码查询。"
+        )
+        return
+
+    if not results:
+        await message.reply(
+            f"未找到“{html.escape(query)}”相关股票。\n"
+            "可尝试英文名或拼音，或直接输入代码，例如 /quote 7203.JP"
+        )
+        return
+
+    lines = [f"找到 {len(results)} 个结果："]
+    for index, result in enumerate(results, 1):
+        market_label = MARKET_LABELS.get(result.market, result.market)
+        exchange = (
+            f"/{html.escape(result.exchange)}" if result.exchange else ""
+        )
+        lines.append(
+            f"{index}. {html.escape(result.display_symbol())} — "
+            f"{html.escape(result.name)} "
+            f"[{market_label}{exchange}]"
+        )
+    lines.append("")
+    lines.append(f"使用：/quote {html.escape(results[0].display_symbol())}")
+    await message.reply("\n".join(lines))
+
+
 async def _cmd_trade(
     message: types.Message,
     command: CommandObject,
@@ -260,7 +317,10 @@ async def _cmd_trade(
         quote = await quotes.get_quote(symbol)
         if quote is None or not math.isfinite(quote.price) or quote.price <= 0:
             action = "买入" if side == Side.BUY else "卖出"
-            await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
+            await message.reply(
+                f"未找到 {symbol} 的行情数据，无法记录{action}"
+                + await quote_missing_text(symbol)
+            )
             return
         await _cmd_trade_parsed(
             message, state, side, (symbol, quote.price, qty, leverage), quote=quote
@@ -283,7 +343,10 @@ async def _cmd_trade_parsed(
         quote = await quotes.get_quote(symbol)
     action = "买入" if side == Side.BUY else "卖出"
     if quote is None or not quote.price:
-        await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
+        await message.reply(
+            f"未找到 {symbol} 的行情数据，无法记录{action}"
+            + await quote_missing_text(symbol)
+        )
         return
     name = quote.name
     symbol = quote.symbol
@@ -452,7 +515,10 @@ async def _cmd_amount_trade(
     quote = await quotes.get_quote(symbol)
     action = "买入" if side == Side.BUY else "卖出"
     if quote is None or not math.isfinite(quote.price) or quote.price <= 0:
-        await message.reply(f"未找到 {symbol} 的行情数据，无法记录{action}")
+        await message.reply(
+            f"未找到 {symbol} 的行情数据，无法记录{action}"
+            + await quote_missing_text(symbol)
+        )
         return
     if at_market:
         price = quote.price
@@ -561,7 +627,10 @@ async def cmd_close(
 
     quote = await quotes.get_quote(symbol)
     if quote is None or not quote.price:
-        await message.reply(f"未找到 {symbol} 的行情数据，无法平仓")
+        await message.reply(
+            f"未找到 {symbol} 的行情数据，无法平仓"
+            + await quote_missing_text(symbol)
+        )
         return
     name = quote.name
     symbol = quote.symbol

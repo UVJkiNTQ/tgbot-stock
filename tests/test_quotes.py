@@ -31,6 +31,26 @@ class SymbolTests(unittest.TestCase):
                 self.assertEqual(quotes.detect_market(raw), "BSE")
                 self.assertEqual(quotes.market_candidates(raw), frozenset({"BSE"}))
 
+    def test_japanese_stock_requires_an_explicit_jp_qualifier(self) -> None:
+        for raw in ("7203.JP", "jp7203", "JP7203"):
+            with self.subTest(raw=raw):
+                self.assertEqual(quotes.normalize_symbol(raw), "7203")
+                self.assertEqual(quotes.detect_market(raw), "JP")
+                self.assertEqual(quotes.market_candidates(raw), frozenset({"JP"}))
+                self.assertEqual(quotes.market_currency(raw), "JPY")
+                self.assertEqual(quotes.yahoo_symbol(raw, "JP"), "7203.T")
+
+        self.assertEqual(quotes.normalize_symbol("7203"), "07203")
+        self.assertEqual(quotes.detect_market("7203"), "HK")
+
+    def test_japan_alternative_is_only_offered_for_unqualified_hk_like_codes(
+        self
+    ) -> None:
+        self.assertEqual(quotes.japan_alternative_code("7203"), "7203")
+        self.assertIsNone(quotes.japan_alternative_code("00700"))
+        self.assertIsNone(quotes.japan_alternative_code("7203.HK"))
+        self.assertIsNone(quotes.japan_alternative_code("7203.JP"))
+
     def test_us_ticker_hkd_remains_us_ticker(self) -> None:
         self.assertEqual(quotes.normalize_symbol("HKD"), "HKD")
         self.assertEqual(quotes.detect_market("HKD"), "US")
@@ -83,6 +103,47 @@ class SinaParserTests(unittest.TestCase):
         self.assertIsNone(quotes._parse_sina_fields("00700", ["bad"]))
 
 
+class YahooChartParserTests(unittest.TestCase):
+    def test_parses_japanese_quote_from_v8_chart_payload(self) -> None:
+        payload = {
+            "meta": {
+                "symbol": "7203.T",
+                "longName": "Toyota Motor Corporation",
+                "shortName": "TOYOTA MOTOR CORP",
+                "regularMarketPrice": 3312.0,
+                "chartPreviousClose": 3378.0,
+                "regularMarketDayHigh": 3384.0,
+                "regularMarketDayLow": 3298.0,
+            },
+            "indicators": {
+                "quote": [
+                    {
+                        "open": [3348.0],
+                        "high": [3384.0],
+                        "low": [3298.0],
+                        "close": [3312.0],
+                    }
+                ]
+            },
+        }
+        quote = quotes._parse_yahoo_chart_quote("7203", "JP", payload)
+        self.assertIsNotNone(quote)
+        assert quote is not None
+        self.assertEqual(quote.symbol, "7203")
+        self.assertEqual(quote.market, "JP")
+        self.assertEqual(quote.name, "Toyota Motor Corporation")
+        self.assertEqual(quote.price, 3312.0)
+        self.assertEqual(quote.open, 3348.0)
+        self.assertEqual(quote.prev_close, 3378.0)
+        self.assertEqual(quote.high, 3384.0)
+        self.assertEqual(quote.low, 3298.0)
+
+    def test_rejects_missing_price_in_yahoo_chart_payload(self) -> None:
+        self.assertIsNone(
+            quotes._parse_yahoo_chart_quote("AAPL", "US", {"meta": {}})
+        )
+
+
 class RateTests(unittest.IsolatedAsyncioTestCase):
     async def test_currency_is_case_insensitive(self) -> None:
         quotes.clear_cache()
@@ -123,6 +184,20 @@ class MarketIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             quotes._quote_cache[("002714", "FUND")][0].market, "FUND"
         )
+
+    async def test_missing_hk_quote_offers_japan_alternative(self) -> None:
+        japan = quotes.Quote(
+            symbol="7203", name="Toyota Motor Corporation", price=3312.0,
+            open=3348.0, prev_close=3378.0, high=3384.0, low=3298.0,
+            market="JP",
+        )
+        with patch.object(
+            quotes, "get_quote", AsyncMock(return_value=japan)
+        ) as get_quote:
+            alternative = await quotes.get_japan_alternative("7203")
+
+        self.assertIs(alternative, japan)
+        get_quote.assert_awaited_once_with("7203.JP")
 
     async def test_fund_fallback_cannot_satisfy_an_a_share_request(self) -> None:
         fund = quotes.Quote(

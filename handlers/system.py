@@ -1,7 +1,7 @@
 import logging
 
-from aiogram import Router, types
-from aiogram.filters import Command
+import telegram as types
+from telegram import Command, Router
 
 import models
 import maintenance
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = """股票持仓 Bot 命令：
 
 /quote SYMBOL — 查实时行情
+/find KEYWORD — 按名称搜索股票代码
 /buy SYMBOL PRICE QTY [Nx] — 买入；如填写杠杆需以 x 结尾
 /sell SYMBOL PRICE QTY [Nx] — 卖出；如填写杠杆需以 x 结尾
 /buya SYMBOL PRICE AMOUNT [Nx] [Ns] — 按人民币预算计算最大买入量
@@ -30,9 +31,9 @@ HELP_TEXT = """股票持仓 Bot 命令：
 /trades — 查看我的交易记录（含ID，按北京时间显示）
 /del ID [ID ...] — 删除一条或多条交易记录
 /del SYMBOL Nx — 删除指定代码、杠杆的全部交易记录
-/update — 将旧数据库一次规整为当前 v2（可重复安全执行）
+/update — 将旧数据库一次规整为当前 v3（可重复安全执行）
 
-SYMBOL 示例：600000(A股) 920118(北交所) 00700(港股) AAPL(美股)
+SYMBOL 示例：600000(A股) 920118(北交所) 00700(港股) AAPL(美股) 7203.JP(日股)
 ETF 也支持：510050 159919 02800
 
 同方向使用不同杠杆会建立独立持仓条目。
@@ -44,7 +45,9 @@ ETF 也支持：510050 159919 02800
 
 代码冲突时强制指定类型（加后缀）：
 · 010042.F — 场外基金
-· 600000.A — A股  ·  920118.BSE — 北交所  ·  00700.HK — 港股  ·  AAPL.US — 美股"""
+· 600000.A — A股  ·  920118.BSE — 北交所  ·  00700.HK — 港股  ·  AAPL.US — 美股  ·  7203.JP — 日股
+
+四位数代码默认按港股处理；港股查不到时会提示可尝试同名日本股票（加 .JP）。"""
 
 
 @router.message(Command("start", "help"))
@@ -92,7 +95,7 @@ async def cmd_update(message: types.Message) -> None:
         await message.reply(
             f"数据库规整完成：v{result.old_version} → v{result.new_version}\n"
             f"数量已转换 {result.rows_updated} 条：数据库中的 1 = 0.01 股\n"
-            f"已增加杠杆和市场字段；历史交易统一为 1x，{market_message}\n"
+            f"市场与杠杆字段已就绪；历史交易统一为 1x，{market_message}\n"
             "维护结束，现在可以继续使用"
         )
     finally:

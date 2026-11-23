@@ -63,6 +63,65 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(trade.market, "BSE")
             self.assertEqual(summary, {"920118.BSE": q(1)})
 
+    async def test_japanese_stock_is_stored_as_a_separate_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                trade = await models.insert_trade(
+                    1, "tester", "7203.JP", models.Side.BUY,
+                    3312.0, q(1), "JPY", 0.042083,
+                )
+                summary = await models.get_user_summary(1)
+
+            self.assertEqual(trade.market, "JP")
+            self.assertEqual(trade.currency, "JPY")
+            self.assertEqual(summary, {"7203.JP": q(1)})
+
+    async def test_v2_database_is_upgraded_to_accept_japanese_market(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "trades.db")
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute(
+                    """CREATE TABLE trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
+                        price REAL NOT NULL,
+                        qty INTEGER NOT NULL,
+                        leverage REAL NOT NULL DEFAULT 1.0,
+                        market TEXT NOT NULL CHECK(market IN ('A','HK','US','FUND','BSE')),
+                        trade_ts TEXT NOT NULL,
+                        currency TEXT NOT NULL DEFAULT 'CNY',
+                        rate REAL NOT NULL DEFAULT 1.0
+                    )"""
+                )
+                await db.execute(
+                    "INSERT INTO trades "
+                    "(user_id, username, symbol, side, price, qty, market, trade_ts) "
+                    "VALUES (1, 'tester', '600000', 'BUY', 10, 100, 'A', "
+                    "'2026-01-01')"
+                )
+                await db.execute("PRAGMA user_version = 2")
+                await db.commit()
+
+            with patch.object(models.config, "DB_PATH", db_path):
+                await models.init_db()
+                trade = await models.insert_trade(
+                    1, "tester", "7203.JP", models.Side.BUY,
+                    3312.0, q(1), "JPY", 0.042083,
+                )
+                summary = await models.get_user_summary(1)
+
+            async with aiosqlite.connect(db_path) as db:
+                version = (await (await db.execute("PRAGMA user_version")).fetchone())[0]
+
+            self.assertEqual(trade.market, "JP")
+            self.assertEqual(version, models.DB_SCHEMA_VERSION)
+            self.assertEqual(summary, {"600000.A": 100, "7203.JP": q(1)})
+
     async def test_fresh_database_stores_integer_hundredth_share_units(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "trades.db")
@@ -150,7 +209,7 @@ class DatabaseInitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(after, {"600000.A": 30025})
             self.assertFalse(second.updated)
             self.assertEqual(version, models.DB_SCHEMA_VERSION)
-            self.assertEqual(models.DB_SCHEMA_VERSION, 2)
+            self.assertEqual(models.DB_SCHEMA_VERSION, 3)
 
     async def test_init_backfills_market_in_prerelease_v1_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

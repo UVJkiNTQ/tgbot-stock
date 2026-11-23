@@ -6,6 +6,7 @@ from kline import (
     DailySeries,
     _parse_sina_rows,
     _parse_tencent_rows,
+    _parse_yahoo_chart,
     render_chart,
 )
 
@@ -77,6 +78,30 @@ class SinaDailyParseTests(unittest.TestCase):
         self.assertEqual(
             _parse_sina_rows([{"day": "2026-11-20"}, "nope"]), []
         )
+
+
+class YahooDailyParseTests(unittest.TestCase):
+    def test_parses_v8_chart_bars_and_skips_nulls(self) -> None:
+        result = {
+            "meta": {"exchangeTimezoneName": "America/New_York"},
+            "timestamp": [1763562600, 1763649000, 1763735400],
+            "indicators": {
+                "quote": [
+                    {
+                        "open": [100.0, None, 102.0],
+                        "high": [105.0, None, 106.0],
+                        "low": [99.0, None, 101.0],
+                        "close": [104.0, None, 105.5],
+                        "volume": [1000, None, 2000],
+                    }
+                ]
+            },
+        }
+        bars = _parse_yahoo_chart(result)
+        self.assertEqual(len(bars), 2)
+        self.assertEqual(bars[0].open, 100.0)
+        self.assertEqual(bars[0].close, 104.0)
+        self.assertEqual(bars[1].volume, 2000.0)
 
 
 class RenderKlineTests(unittest.TestCase):

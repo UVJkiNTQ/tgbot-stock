@@ -1,19 +1,24 @@
-import asyncio
 import io
 import math
 import time
 from dataclasses import dataclass
 from datetime import datetime
 
-import httpx
-import yfinance as yf  # type: ignore
 from PIL import Image, ImageDraw
 
 from chartstyle import fit_text, font as load_font, font_path
-from instrument import resolve_instrument
+from http_client import (
+    cache_set,
+    fetch_yahoo_chart,
+    get_client,
+    yahoo_exchange_tz,
+    yahoo_timestamp_to_local,
+)
+from instrument import resolve_instrument, yahoo_symbol
 
 
 INTRADAY_CACHE_TTL = 20.0
+INTRADAY_CACHE_MAX = 128
 _CHART_WIDTH = 1000
 _CHART_HEIGHT = 460
 _MARGIN_LEFT = 78
@@ -125,16 +130,14 @@ async def _fetch_tencent(symbol: str, market: str) -> list[IntradayPoint]:
         "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
         f"?code={code}"
     )
-    async with httpx.AsyncClient(
+    client = get_client()
+    resp = await client.get(
+        url,
+        headers={"Referer": "https://gu.qq.com/"},
         timeout=8,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://gu.qq.com/",
-        },
-    ) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        payload = resp.json()
+    )
+    resp.raise_for_status()
+    payload = resp.json()
 
     node = (payload.get("data") or {}).get(code) or {}
     body = node.get("data") or {}
@@ -144,36 +147,43 @@ async def _fetch_tencent(symbol: str, market: str) -> list[IntradayPoint]:
     return _parse_tencent_rows(body.get("data") or [], date_str)
 
 
-def _fetch_us(symbol: str) -> list[IntradayPoint]:
-    try:
-        frame = yf.Ticker(symbol).history(
-            period="1d",
-            interval="1m",
-            prepost=False,
-            auto_adjust=False,
-        )
-    except Exception:
-        return []
-    if frame is None or frame.empty:
+def _parse_yahoo_chart(result: dict) -> list[IntradayPoint]:
+    timestamps = result.get("timestamp")
+    indicators = result.get("indicators") or {}
+    quotes = indicators.get("quote") or []
+    if (
+        not isinstance(timestamps, list)
+        or not timestamps
+        or not isinstance(quotes, list)
+        or not quotes
+        or not isinstance(quotes[0], dict)
+    ):
         return []
 
+    quote_node = quotes[0]
+    closes = quote_node.get("close") or []
+    volumes = quote_node.get("volume") or []
+    tz = yahoo_exchange_tz(result.get("meta") or {})
+
     points: list[IntradayPoint] = []
-    for index, row in frame.iterrows():
+    for index, ts in enumerate(timestamps):
+        if ts is None or index >= len(closes) or closes[index] is None:
+            continue
         try:
-            price = float(row["Close"])
+            price = float(closes[index])
         except (TypeError, ValueError):
             continue
         if not math.isfinite(price) or price <= 0:
             continue
+        raw_vol = volumes[index] if index < len(volumes) else None
         try:
-            volume = float(row.get("Volume") or 0.0)
+            volume = float(raw_vol) if raw_vol is not None else 0.0
         except (TypeError, ValueError):
             volume = 0.0
-        moment = (
-            index.to_pydatetime()
-            if hasattr(index, "to_pydatetime")
-            else index
-        )
+        try:
+            moment = yahoo_timestamp_to_local(ts, tz)
+        except (TypeError, ValueError, OSError):
+            continue
         points.append(
             IntradayPoint(
                 time=moment,
@@ -184,6 +194,18 @@ def _fetch_us(symbol: str) -> list[IntradayPoint]:
 
     _attach_vwap(points)
     return points
+
+
+async def _fetch_yahoo(symbol: str, market: str) -> list[IntradayPoint]:
+    result = await fetch_yahoo_chart(
+        yahoo_symbol(symbol, market),
+        range_="1d",
+        interval="1m",
+        include_prepost=False,
+    )
+    if result is None:
+        return []
+    return _parse_yahoo_chart(result)
 
 
 async def get_intraday(quote) -> Intraday | None:
@@ -198,8 +220,8 @@ async def get_intraday(quote) -> Intraday | None:
         return cached[0]
 
     try:
-        if quote.market == "US":
-            points = await asyncio.to_thread(_fetch_us, quote.symbol)
+        if quote.market in ("US", "JP"):
+            points = await _fetch_yahoo(quote.symbol, quote.market)
         else:
             points = await _fetch_tencent(quote.symbol, quote.market)
     except Exception:
@@ -219,7 +241,14 @@ async def get_intraday(quote) -> Intraday | None:
         points=points,
         name=getattr(quote, "name", "") or "",
     )
-    _intraday_cache[key] = (data, now)
+    cache_set(
+        _intraday_cache,
+        key,
+        data,
+        now,
+        ttl=INTRADAY_CACHE_TTL,
+        max_size=INTRADAY_CACHE_MAX,
+    )
     return data
 
 

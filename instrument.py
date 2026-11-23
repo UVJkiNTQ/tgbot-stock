@@ -1,4 +1,4 @@
-MARKETS = frozenset({"A", "HK", "US", "FUND", "BSE"})
+MARKETS = frozenset({"A", "HK", "US", "FUND", "BSE", "JP"})
 
 _MARKET_SUFFIX = {
     "A": ".A",
@@ -6,6 +6,7 @@ _MARKET_SUFFIX = {
     "US": ".US",
     "FUND": ".F",
     "BSE": ".BSE",
+    "JP": ".JP",
 }
 
 # These are code *segments*, rather than a claim that every code currently in
@@ -45,7 +46,14 @@ def normalize_symbol(symbol: str) -> str:
     if not s:
         raise ValueError("symbol cannot be empty")
 
-    if s.endswith(".BSE"):
+    japan = False
+    if s.endswith(".JP"):
+        s = s[:-3]
+        japan = True
+    elif s.startswith("JP") and s[2:].isdigit():
+        s = s[2:]
+        japan = True
+    elif s.endswith(".BSE"):
         s = s[:-4]
     elif s.endswith(".BJ"):
         s = s[:-3]
@@ -63,7 +71,7 @@ def normalize_symbol(symbol: str) -> str:
         s = s[2:]
 
     if s.isdigit() and len(s) <= 5:
-        return s.zfill(5)
+        return s if japan else s.zfill(5)
     return s
 
 
@@ -74,7 +82,10 @@ def parse_symbol(symbol: str) -> tuple[str, str | None]:
         raise ValueError("symbol cannot be empty")
 
     forced: str | None = None
-    if s.endswith(".BSE") or s.endswith(".BJ"):
+    if s.endswith(".JP"):
+        forced = "JP"
+        s = s[:-3]
+    elif s.endswith(".BSE") or s.endswith(".BJ"):
         forced = "BSE"
         suffix_length = 4 if s.endswith(".BSE") else 3
         s = s[:-suffix_length]
@@ -90,11 +101,14 @@ def parse_symbol(symbol: str) -> tuple[str, str | None]:
     elif s.endswith(".HK") and s[:-3].isdigit():
         forced = "HK"
         s = s[:-3]
+    elif s.startswith("JP") and s[2:].isdigit():
+        forced = "JP"
+        s = s[2:]
     elif s.startswith("BJ") and s[2:].isdigit():
         forced = "BSE"
         s = s[2:]
 
-    if forced == "FUND":
+    if forced in ("FUND", "JP"):
         return s, forced
     return normalize_symbol(s), forced
 
@@ -107,7 +121,10 @@ def market_candidates(symbol: str) -> frozenset[str]:
     ``detect_market`` keeps the historical A-share fallback for compatibility
     when no explicit qualifier was supplied.
     """
-    s = normalize_symbol(symbol)
+    base, forced = parse_symbol(symbol)
+    if forced is not None:
+        return frozenset({forced})
+    s = base
     if not s.isdigit():
         return frozenset({"US"})
     if len(s) == 5:
@@ -131,6 +148,9 @@ def market_candidates(symbol: str) -> frozenset[str]:
 
 
 def detect_market(symbol: str) -> str:
+    _, forced = parse_symbol(symbol)
+    if forced is not None:
+        return forced
     s = normalize_symbol(symbol)
     candidates = market_candidates(s)
     if candidates == frozenset({"HK"}):
@@ -163,9 +183,24 @@ def resolve_instrument(
         raise ValueError(
             f"symbol qualifier {forced} conflicts with market {explicit}"
         )
+    if (
+        (explicit or forced) == "JP"
+        and len(base) == 5
+        and base.startswith("0")
+        and base.isdigit()
+    ):
+        base = base[1:]
     return base, explicit or forced or detect_market(base)
 
 
 def qualified_symbol(symbol: str, market: str) -> str:
     base, resolved_market = resolve_instrument(symbol, market)
     return f"{base}{_MARKET_SUFFIX[resolved_market]}"
+
+
+def yahoo_symbol(symbol: str, market: str) -> str:
+    """Return the Yahoo Finance ticker for a US or Japanese instrument."""
+    base, resolved_market = resolve_instrument(symbol, market)
+    if resolved_market == "JP":
+        return f"{base}.T"
+    return base

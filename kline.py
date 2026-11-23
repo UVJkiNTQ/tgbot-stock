@@ -1,19 +1,24 @@
-import asyncio
 import io
 import math
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
 
-import httpx
-import yfinance as yf  # type: ignore
 from PIL import Image, ImageDraw
 
 from chartstyle import fit_text, font as load_font, font_path
-from instrument import resolve_instrument
+from http_client import (
+    cache_set,
+    fetch_yahoo_chart,
+    get_client,
+    yahoo_exchange_tz,
+    yahoo_timestamp_to_local,
+)
+from instrument import resolve_instrument, yahoo_symbol
 
 
 KLINE_CACHE_TTL = 60.0
+KLINE_CACHE_MAX = 128
 KLINE_FETCH_DAYS = 120
 _CHART_WIDTH = 1000
 _CHART_HEIGHT = 460
@@ -132,16 +137,14 @@ async def _fetch_tencent(symbol: str, market: str) -> list[DailyBar]:
         "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
         f"?param={code},day,,,{KLINE_FETCH_DAYS},qfq"
     )
-    async with httpx.AsyncClient(
+    client = get_client()
+    resp = await client.get(
+        url,
+        headers={"Referer": "https://gu.qq.com/"},
         timeout=10,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://gu.qq.com/",
-        },
-    ) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        payload = resp.json()
+    )
+    resp.raise_for_status()
+    payload = resp.json()
 
     node = (payload.get("data") or {}).get(code) or {}
     rows = node.get("qfqday") or node.get("day") or []
@@ -160,55 +163,77 @@ async def _fetch_sina(symbol: str, market: str) -> list[DailyBar]:
         "ma": "1",
         "datalen": str(KLINE_FETCH_DAYS),
     }
-    async with httpx.AsyncClient(
+    client = get_client()
+    resp = await client.get(
+        url,
+        params=params,
+        headers={"Referer": "https://finance.sina.com.cn"},
         timeout=10,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://finance.sina.com.cn",
-        },
-    ) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        payload = resp.json()
+    )
+    resp.raise_for_status()
+    payload = resp.json()
 
     if not isinstance(payload, list):
         return []
     return _parse_sina_rows(payload)
 
 
-def _fetch_us(symbol: str) -> list[DailyBar]:
-    try:
-        frame = yf.Ticker(symbol).history(
-            period="6mo", interval="1d", auto_adjust=False
-        )
-    except Exception:
-        return []
-    if frame is None or frame.empty:
+def _parse_yahoo_chart(result: dict) -> list[DailyBar]:
+    timestamps = result.get("timestamp")
+    indicators = result.get("indicators") or {}
+    quotes = indicators.get("quote") or []
+    if (
+        not isinstance(timestamps, list)
+        or not timestamps
+        or not isinstance(quotes, list)
+        or not quotes
+        or not isinstance(quotes[0], dict)
+    ):
         return []
 
+    quote_node = quotes[0]
+    opens = quote_node.get("open") or []
+    highs = quote_node.get("high") or []
+    lows = quote_node.get("low") or []
+    closes = quote_node.get("close") or []
+    volumes = quote_node.get("volume") or []
+    tz = yahoo_exchange_tz(result.get("meta") or {})
+
     bars: list[DailyBar] = []
-    for index, row in frame.iterrows():
-        try:
-            open_price = float(row["Open"])
-            high = float(row["High"])
-            low = float(row["Low"])
-            close = float(row["Close"])
-            volume = float(row.get("Volume") or 0.0)
-        except (TypeError, ValueError):
+    for index, ts in enumerate(timestamps):
+        if ts is None:
             continue
-        moment = (
-            index.date()
-            if hasattr(index, "date")
-            else index
-        )
+        try:
+            open_price = float(opens[index])
+            high = float(highs[index])
+            low = float(lows[index])
+            close = float(closes[index])
+            raw_vol = volumes[index] if index < len(volumes) else None
+            volume = float(raw_vol) if raw_vol is not None else 0.0
+            day = yahoo_timestamp_to_local(ts, tz).date()
+        except (IndexError, TypeError, ValueError, OSError):
+            continue
         bar = _normalize_bar(
-            moment, open_price, high, low, close,
+            day,
+            open_price,
+            high,
+            low,
+            close,
             volume if volume > 0 else None,
         )
         if bar is not None:
             bars.append(bar)
     bars.sort(key=lambda item: item.day)
     return bars
+
+
+async def _fetch_yahoo(symbol: str, market: str) -> list[DailyBar]:
+    result = await fetch_yahoo_chart(
+        yahoo_symbol(symbol, market), range_="6mo", interval="1d"
+    )
+    if result is None:
+        return []
+    return _parse_yahoo_chart(result)
 
 
 async def get_daily(quote) -> DailySeries | None:
@@ -223,8 +248,8 @@ async def get_daily(quote) -> DailySeries | None:
         return cached[0]
 
     try:
-        if quote.market == "US":
-            bars = await asyncio.to_thread(_fetch_us, quote.symbol)
+        if quote.market in ("US", "JP"):
+            bars = await _fetch_yahoo(quote.symbol, quote.market)
         elif quote.market == "BSE":
             bars = await _fetch_sina(quote.symbol, quote.market)
         else:
@@ -241,7 +266,14 @@ async def get_daily(quote) -> DailySeries | None:
         bars=bars[-KLINE_FETCH_DAYS:],
         name=getattr(quote, "name", "") or "",
     )
-    _daily_cache[key] = (series, now)
+    cache_set(
+        _daily_cache,
+        key,
+        series,
+        now,
+        ttl=KLINE_CACHE_TTL,
+        max_size=KLINE_CACHE_MAX,
+    )
     return series
 
 

@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aiogram import Router, types
-from aiogram.filters import Command, CommandObject
+import telegram as types
+from telegram import Command, CommandObject, Router
 
 import config
 import models

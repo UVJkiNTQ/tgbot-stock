@@ -15,6 +15,7 @@ from handlers import (
     _price_deviation,
 )
 from quotes import Quote
+from instrument_search import SearchResult
 
 
 class BuyHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -141,6 +142,46 @@ class BuyHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("小米集团－Ｗ (01810)", reply)
         self.assertIn("500股 @ HKD 28.9000", reply)
         self.assertNotIn("委托价偏离", reply)
+
+    async def test_japanese_buy_uses_jpy_and_canonical_symbol(self) -> None:
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(
+                id=123, username="tester", full_name="Test User"
+            ),
+            reply=AsyncMock(),
+        )
+        command = SimpleNamespace(args="JP7203 3312 100")
+        state = SimpleNamespace(set_state=AsyncMock(), update_data=AsyncMock())
+        quote = Quote(
+            symbol="7203", name="Toyota Motor Corporation", price=3312.0,
+            open=3348.0, prev_close=3383.0, high=3384.0, low=3298.0,
+            market="JP",
+        )
+
+        with (
+            patch.object(
+                handlers.quotes, "get_quote", AsyncMock(return_value=quote)
+            ) as get_quote,
+            patch.object(
+                handlers.quotes, "get_rate", AsyncMock(return_value=0.042083)
+            ),
+            patch.object(
+                handlers.models, "get_position_entries", AsyncMock(return_value=[])
+            ),
+        ):
+            await handlers.cmd_buy(message, command, state)
+
+        get_quote.assert_awaited_once_with("JP7203")
+        saved = state.update_data.await_args.kwargs
+        self.assertEqual(saved["symbol"], "7203")
+        self.assertEqual(saved["market"], "JP")
+        self.assertEqual(saved["currency"], "JPY")
+        self.assertEqual(saved["qty"], 10000)
+
+        reply = message.reply.await_args.args[0]
+        self.assertIn("Toyota Motor Corporation (7203)", reply)
+        self.assertIn("100股 @ JPY 3,312.0000", reply)
+        self.assertIn("汇率 JPY/CNY: 0.0421", reply)
 
     async def test_hong_kong_amount_uses_cny_budget_and_hkd_rate(self) -> None:
         message = SimpleNamespace(
@@ -388,6 +429,20 @@ class TradeInputTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         assert parsed is not None
         self.assertEqual(parsed[0], "920118.BSE")
+
+    def test_japanese_qualifier_is_preserved(self) -> None:
+        for raw in ("7203.JP", "JP7203"):
+            with self.subTest(raw=raw):
+                parsed = _parse_trade_args(f"{raw} 3312 1")
+                self.assertIsNotNone(parsed)
+                assert parsed is not None
+                self.assertEqual(parsed[0], raw)
+
+    def test_amount_trade_preserves_japanese_qualifier(self) -> None:
+        parsed = _parse_amount_trade_args("JP7203 3312 10000")
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed[0], "JP7203")
 
     def test_amount_trade_floors_to_lot_without_exceeding_amount(self) -> None:
         parsed = _parse_amount_trade_args("600000 28.9 10000 100s 5x")
@@ -640,6 +695,34 @@ class QuoteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(media[0].caption)
         self.assertIsNone(media[1].caption)
 
+    async def test_quote_missing_hk_suggests_japan_alternative(self) -> None:
+        message = SimpleNamespace(
+            reply=AsyncMock(),
+            reply_photo=AsyncMock(),
+            reply_media_group=AsyncMock(),
+        )
+        command = SimpleNamespace(args="7203")
+        japan = Quote(
+            symbol="7203", name="Toyota Motor Corporation", price=3312.0,
+            open=3348.0, prev_close=3383.0, high=3384.0, low=3298.0,
+            market="JP",
+        )
+
+        with (
+            patch.object(
+                handlers.quotes, "get_quote", AsyncMock(return_value=None)
+            ),
+            patch.object(
+                handlers.quotes, "get_japan_alternative",
+                AsyncMock(return_value=japan),
+            ),
+        ):
+            await handlers.cmd_quote(message, command)
+
+        text = message.reply.await_args.args[0]
+        self.assertIn("7203.JP", text)
+        self.assertIn("Toyota Motor Corporation", text)
+
     async def test_quote_falls_back_to_text_without_charts(self) -> None:
         message = SimpleNamespace(
             reply=AsyncMock(),
@@ -670,6 +753,51 @@ class QuoteCommandTests(unittest.IsolatedAsyncioTestCase):
         message.reply_media_group.assert_not_awaited()
         message.reply_photo.assert_not_awaited()
         message.reply.assert_awaited_once()
+
+
+class FindCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_find_formats_supported_code(self) -> None:
+        message = SimpleNamespace(reply=AsyncMock())
+        command = SimpleNamespace(args="wacom")
+        results = [
+            SearchResult(
+                symbol="6727", market="JP", name="Wacom Co., Ltd.",
+                exchange="Tokyo Stock Exchange", rank=0,
+            )
+        ]
+        with patch.object(
+            handlers.trading.instrument_search,
+            "search_instruments",
+            AsyncMock(return_value=results),
+        ):
+            await handlers.cmd_find(message, command)
+
+        text = message.reply.await_args.args[0]
+        self.assertIn("6727.JP", text)
+        self.assertIn("Wacom Co., Ltd.", text)
+        self.assertIn("/quote 6727.JP", text)
+
+    async def test_find_without_keyword_shows_usage(self) -> None:
+        message = SimpleNamespace(reply=AsyncMock())
+        command = SimpleNamespace(args=None)
+
+        await handlers.cmd_find(message, command)
+
+        self.assertIn("/find 关键词", message.reply.await_args.args[0])
+
+    async def test_find_without_results_suggests_code(self) -> None:
+        message = SimpleNamespace(reply=AsyncMock())
+        command = SimpleNamespace(args="unknown-company")
+        with patch.object(
+            handlers.trading.instrument_search,
+            "search_instruments",
+            AsyncMock(return_value=[]),
+        ):
+            await handlers.cmd_find(message, command)
+
+        text = message.reply.await_args.args[0]
+        self.assertIn("未找到", text)
+        self.assertIn("/quote", text)
 
 
 if __name__ == "__main__":

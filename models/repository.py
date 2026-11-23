@@ -2,13 +2,13 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-import config
 from instrument import (
     normalize_symbol,
     parse_symbol,
     qualified_symbol,
     resolve_instrument,
 )
+from .connection import get_db
 from .schema import (
     position_entries_from_rows,
     row_leverage,
@@ -42,8 +42,7 @@ async def insert_trade(
     ts = datetime.now(timezone.utc).isoformat()
     canonical_symbol, canonical_market = resolve_instrument(symbol, market)
 
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         await db.execute("BEGIN IMMEDIATE")
         version = await schema_version(db)
         position_rows = await (
@@ -113,8 +112,7 @@ async def get_latest_trade_leverage(
 ) -> float | None:
     """Return the leverage on the most recent transaction for an instrument."""
     canonical_symbol, canonical_market = resolve_instrument(symbol, market)
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         row = await (
             await db.execute(
                 "SELECT leverage FROM trades "
@@ -146,8 +144,7 @@ async def insert_close_trades(
     canonical_symbol, canonical_market = resolve_instrument(symbol, market)
     ts = datetime.now(timezone.utc).isoformat()
 
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         await db.execute("BEGIN IMMEDIATE")
         version = await schema_version(db)
         position_rows = await (
@@ -244,8 +241,7 @@ def _row_to_trade(row: aiosqlite.Row, version: int) -> Trade:
 async def get_trades(
     user_id: int, symbol: str | None = None, market: str | None = None
 ) -> list[Trade]:
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         await db.execute("BEGIN")
         version = await schema_version(db)
         if symbol:
@@ -280,8 +276,7 @@ async def get_position_entries(
     user_id: int, symbol: str | None = None, market: str | None = None
 ) -> list[PositionEntry]:
     """Return open positions grouped independently by symbol and leverage."""
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         await db.execute("BEGIN")
         version = await schema_version(db)
         if symbol:
@@ -328,8 +323,7 @@ async def get_position_entries(
 
 
 async def get_all_trades() -> list[Trade]:
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         await db.execute("BEGIN")
         version = await schema_version(db)
         cur = await db.execute("SELECT * FROM trades ORDER BY trade_ts, id")
@@ -338,7 +332,7 @@ async def get_all_trades() -> list[Trade]:
 
 
 async def get_distinct_symbols() -> list[str]:
-    async with aiosqlite.connect(config.DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "SELECT DISTINCT symbol, market FROM trades ORDER BY symbol, market"
         )
@@ -347,8 +341,7 @@ async def get_distinct_symbols() -> list[str]:
 
 
 async def get_trade_by_id(trade_id: int) -> Trade | None:
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(row_factory=aiosqlite.Row) as db:
         await db.execute("BEGIN")
         version = await schema_version(db)
         cur = await db.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
@@ -370,7 +363,7 @@ async def delete_trades(trade_ids: list[int], user_id: int) -> list[int]:
     if not requested_ids:
         return []
 
-    async with aiosqlite.connect(config.DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         rows = await (
             await db.execute(
@@ -397,7 +390,7 @@ async def delete_trades_by_symbol_leverage(
     """Delete every trade in one exact instrument/leverage bucket."""
     canonical_symbol, canonical_market = resolve_instrument(symbol, market)
     canonical_leverage = normalize_leverage(leverage)
-    async with aiosqlite.connect(config.DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "DELETE FROM trades "
             "WHERE user_id = ? AND symbol = ? AND market = ? AND leverage = ?",
@@ -422,7 +415,7 @@ async def get_user_summary(user_id: int) -> dict[str, int]:
 
 
 async def get_distinct_users() -> list[tuple[int, str]]:
-    async with aiosqlite.connect(config.DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "SELECT DISTINCT user_id, username FROM trades ORDER BY user_id"
         )

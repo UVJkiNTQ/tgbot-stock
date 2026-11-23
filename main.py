@@ -2,15 +2,12 @@ import asyncio
 import logging
 import sys
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
-
 import config
 import handlers
+import http_client
 import maintenance
 import models
+from telegram import Bot, BotCommand, Dispatcher, ParseMode
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 BOT_COMMANDS = [
     BotCommand(command="quote", description="查实时行情、分时和日K：/quote SYMBOL"),
+    BotCommand(command="find", description="按名称搜索股票代码：/find wacom"),
     BotCommand(command="buy", description="买入：/buy SYMBOL PRICE QTY [Nx]"),
     BotCommand(command="buya", description="按人民币预算买入：/buya SYMBOL PRICE AMOUNT"),
     BotCommand(command="sell", description="卖出：/sell SYMBOL PRICE QTY [Nx]"),
@@ -49,18 +47,23 @@ async def main() -> None:
     await models.init_db()
     logger.info("数据库初始化完成")
 
-    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(token=config.BOT_TOKEN, parse_mode=ParseMode.HTML)
     dp = Dispatcher()
     maintenance_gate = maintenance.MaintenanceMiddleware()
     dp.message.outer_middleware(maintenance_gate)
     dp.callback_query.outer_middleware(maintenance_gate)
     dp.include_router(handlers.router)
 
-    await bot.set_my_commands(BOT_COMMANDS)
-    logger.info("命令菜单已注册")
+    try:
+        await bot.set_my_commands(BOT_COMMANDS)
+        logger.info("命令菜单已注册")
 
-    logger.info("Bot 启动中...")
-    await dp.start_polling(bot)
+        logger.info("Bot 启动中...")
+        await dp.start_polling(bot)
+    finally:
+        await bot.close()
+        await http_client.close_client()
+        await models.close_db()
 
 
 if __name__ == "__main__":

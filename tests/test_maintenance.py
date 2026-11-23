@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aiogram.types import CallbackQuery, Message
+from telegram import CallbackQuery, Message
 
 import maintenance
 from handlers.system import cmd_update

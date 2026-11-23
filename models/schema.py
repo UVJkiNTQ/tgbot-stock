@@ -4,7 +4,8 @@ from decimal import Decimal
 import aiosqlite
 
 import config
-from instrument import detect_market
+from instrument import MARKETS, detect_market
+from .connection import get_db
 from .types import (
     DatabaseUpdateError,
     DatabaseUpdateResult,
@@ -17,9 +18,11 @@ from .types import (
 
 
 # v0 -> v1 normalized quantities and added leverage/market identity. v1 -> v2
-# expands the market domain to include the Beijing Stock Exchange.
-DB_SCHEMA_VERSION = 2
+# expands the market domain to include the Beijing Stock Exchange. v2 -> v3
+# adds Japanese stocks.
+DB_SCHEMA_VERSION = 3
 QTY_NORMALIZED_VERSION = 1
+MARKET_SQL = ",".join(f"'{market}'" for market in sorted(MARKETS))
 
 
 async def schema_version(db: aiosqlite.Connection) -> int:
@@ -44,7 +47,7 @@ async def create_qty_integrity_triggers(db: aiosqlite.Connection) -> None:
 async def create_market_integrity_triggers(db: aiosqlite.Connection) -> None:
     condition = (
         "typeof(NEW.market) != 'text' OR "
-        "NEW.market NOT IN ('A','HK','US','FUND','BSE')"
+        f"NEW.market NOT IN ({MARKET_SQL})"
     )
     await db.execute(
         f"""CREATE TRIGGER IF NOT EXISTS trades_market_valid_insert
@@ -89,10 +92,10 @@ async def backfill_markets(db: aiosqlite.Connection) -> int:
 async def ensure_market_schema(db: aiosqlite.Connection) -> bool:
     """Ensure the trades table CHECK constraint accepts every market.
 
-    SQLite cannot alter a CHECK constraint in place. Existing v1 databases
-    therefore need a transactional table rebuild before BSE rows can be
-    inserted. All columns and IDs are copied by name; indexes and triggers
-    are recreated by the caller.
+    SQLite cannot alter a CHECK constraint in place. Existing databases
+    therefore need a transactional table rebuild before a newly added market
+    can be stored. All columns and IDs are copied by name; indexes and
+    triggers are recreated by the caller.
     """
     table_row = await (
         await db.execute(
@@ -101,7 +104,9 @@ async def ensure_market_schema(db: aiosqlite.Connection) -> bool:
         )
     ).fetchone()
     table_sql = (table_row[0] or "").upper() if table_row else ""
-    if "BSE" in table_sql:
+    if table_row and all(
+        f"'{market}'" in table_sql for market in MARKETS
+    ):
         return False
 
     for trigger in (
@@ -119,9 +124,11 @@ async def ensure_market_schema(db: aiosqlite.Connection) -> bool:
     ):
         await db.execute(f"DROP INDEX IF EXISTS {index}")
 
-    await db.execute("ALTER TABLE trades RENAME TO trades_before_bse")
     await db.execute(
-        """CREATE TABLE trades (
+        "ALTER TABLE trades RENAME TO trades_before_market_upgrade"
+    )
+    await db.execute(
+        f"""CREATE TABLE trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             username TEXT NOT NULL,
@@ -130,7 +137,7 @@ async def ensure_market_schema(db: aiosqlite.Connection) -> bool:
             price REAL NOT NULL,
             qty INTEGER NOT NULL,
             leverage REAL NOT NULL DEFAULT 1.0,
-            market TEXT NOT NULL CHECK(market IN ('A','HK','US','FUND','BSE')),
+            market TEXT NOT NULL CHECK(market IN ({MARKET_SQL})),
             trade_ts TEXT NOT NULL,
             currency TEXT NOT NULL DEFAULT 'CNY',
             rate REAL NOT NULL DEFAULT 1.0
@@ -142,9 +149,9 @@ async def ensure_market_schema(db: aiosqlite.Connection) -> bool:
              market, trade_ts, currency, rate)
         SELECT id, user_id, username, symbol, side, price, qty, leverage,
                market, trade_ts, currency, rate
-        FROM trades_before_bse"""
+        FROM trades_before_market_upgrade"""
     )
-    await db.execute("DROP TABLE trades_before_bse")
+    await db.execute("DROP TABLE trades_before_market_upgrade")
     return True
 
 
@@ -192,7 +199,7 @@ def position_entries_from_rows(
 async def init_db() -> None:
     db_dir = os.path.dirname(os.path.abspath(config.DB_PATH))
     os.makedirs(db_dir, exist_ok=True)
-    async with aiosqlite.connect(config.DB_PATH) as db:
+    async with get_db() as db:
         table_existed = (
             await (
                 await db.execute(
@@ -202,7 +209,7 @@ async def init_db() -> None:
             is not None
         )
         await db.execute(
-            """CREATE TABLE IF NOT EXISTS trades (
+            f"""CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 username TEXT NOT NULL,
@@ -211,7 +218,7 @@ async def init_db() -> None:
                 price REAL NOT NULL,
                 qty INTEGER NOT NULL,
                 leverage REAL NOT NULL DEFAULT 1.0,
-                market TEXT NOT NULL CHECK(market IN ('A','HK','US','FUND','BSE')),
+                market TEXT NOT NULL CHECK(market IN ({MARKET_SQL})),
                 trade_ts TEXT NOT NULL
             )"""
         )
@@ -233,7 +240,7 @@ async def init_db() -> None:
         invalid_market = await (
             await db.execute(
                 "SELECT id, market FROM trades "
-                "WHERE market NOT IN ('A','HK','US','FUND','BSE') LIMIT 1"
+                f"WHERE market NOT IN ({MARKET_SQL}) LIMIT 1"
             )
         ).fetchone()
         if invalid_market is not None:
@@ -255,7 +262,7 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_trades_side ON trades(side)"
         )
         current_version = await schema_version(db)
-        if not table_existed or current_version == 1:
+        if not table_existed or 1 <= current_version < DB_SCHEMA_VERSION:
             await db.execute(f"PRAGMA user_version = {DB_SCHEMA_VERSION}")
         if await schema_version(db) >= DB_SCHEMA_VERSION:
             await create_qty_integrity_triggers(db)
@@ -265,7 +272,7 @@ async def init_db() -> None:
 
 async def update_database() -> DatabaseUpdateResult:
     """Idempotently migrate the database to the current schema version."""
-    async with aiosqlite.connect(config.DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             # The version is checked while holding the write lock, so two

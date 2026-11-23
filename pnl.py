@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass, field
 
+from http_client import bounded_set
 import models
 import quotes
 from models import Side, Trade
@@ -201,6 +202,7 @@ def calculate_cost_basis(trades: list[Trade]) -> tuple[float, float]:
 
 
 _realized_name_cache: dict[tuple[str, str], str] = {}
+_REALIZED_NAME_CACHE_MAX = 1024
 
 
 async def populate_realized_names(result: UserPnl) -> None:
@@ -227,7 +229,12 @@ async def populate_realized_names(result: UserPnl) -> None:
         quote = qmap.get(key)
         if quote is not None and quote.name:
             item.name = quote.name
-            _realized_name_cache[key] = quote.name
+            bounded_set(
+                _realized_name_cache,
+                key,
+                quote.name,
+                max_size=_REALIZED_NAME_CACHE_MAX,
+            )
 
 
 async def compute_user_pnl(
@@ -315,7 +322,12 @@ async def compute_user_pnl(
 
         name = q.name
         cur_price = q.price
-        _realized_name_cache[(quotes.normalize_symbol(sym), market)] = name
+        bounded_set(
+            _realized_name_cache,
+            (quotes.normalize_symbol(sym), market),
+            name,
+            max_size=_REALIZED_NAME_CACHE_MAX,
+        )
 
         cur_price_cny = cur_price * cur_rate
         mv = net_qty * cur_price / models.QTY_SCALE
