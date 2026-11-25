@@ -18,6 +18,7 @@ pub const HELP_TEXT: &str = "股票持仓 Bot 命令：\n\n\
 /position — 查看我的持仓和浮盈（统一CNY）\n\
 /pnl — 查看历史已实现收益、当前浮盈和总收益\n\
 /lb [u|r] — 总收益排行（u，默认）或仅已实现收益排行（r）\n\
+/today — 今日持仓市值变动比例排行\n\
 /trades — 查看我的交易记录（含ID，按北京时间显示）\n\
 /del ID [ID ...] — 删除一条或多条交易记录\n\
 /del SYMBOL Nx — 删除指定代码、杠杆的全部交易记录\n\

@@ -1,7 +1,7 @@
 use crate::cache::BoundedMap;
 use crate::instrument::normalize_symbol;
 use crate::models::{Db, Side, Trade, QTY_SCALE};
-use crate::quotes::{market_currency, InstrumentKey, QuoteService, RateUnavailableError};
+use crate::quotes::{market_currency, InstrumentKey, Quote, QuoteService, RateUnavailableError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -70,6 +70,68 @@ impl UserPnl {
 
     pub fn total_pnl_margin_cny(&self) -> f64 {
         self.total_closed_margin_cny + self.total_margin_cny
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserTodayChange {
+    pub username: String,
+    pub change_cny: f64,
+    pub prev_market_value_cny: f64,
+}
+
+impl UserTodayChange {
+    pub fn change_pct(&self) -> f64 {
+        if self.prev_market_value_cny > 0.0 {
+            self.change_cny / self.prev_market_value_cny * 100.0
+        } else {
+            0.0
+        }
+    }
+}
+
+struct OpenHolding {
+    symbol: String,
+    market: String,
+    qty: i64,
+    currency: String,
+}
+
+fn compute_user_today_change(
+    username: String,
+    holdings: &[OpenHolding],
+    qmap: &HashMap<InstrumentKey, Quote>,
+    rate_map: &HashMap<String, f64>,
+) -> Option<UserTodayChange> {
+    let mut change_cny = 0.0;
+    let mut prev_market_value_cny = 0.0;
+
+    for h in holdings {
+        let norm = normalize_symbol(&h.symbol).unwrap_or_else(|_| h.symbol.clone());
+        let Some(q) = qmap.get(&(norm, h.market.clone())) else {
+            continue;
+        };
+        if !q.price.is_finite()
+            || q.price <= 0.0
+            || !q.prev_close.is_finite()
+            || q.prev_close <= 0.0
+        {
+            continue;
+        }
+        let cur_rate = *rate_map.get(&h.currency)?;
+        let shares = h.qty as f64 / QTY_SCALE as f64;
+        change_cny += shares * (q.price - q.prev_close) * cur_rate;
+        prev_market_value_cny += shares.abs() * q.prev_close * cur_rate;
+    }
+
+    if prev_market_value_cny > 0.0 {
+        Some(UserTodayChange {
+            username,
+            change_cny,
+            prev_market_value_cny,
+        })
+    } else {
+        None
     }
 }
 
@@ -441,6 +503,110 @@ impl PnlService {
         });
         Ok(results)
     }
+
+    pub async fn compute_today_leaderboard(
+        &self,
+        db: &Db,
+        quotes: &QuoteService,
+    ) -> Result<Vec<UserTodayChange>, RateUnavailableError> {
+        let users = db.get_distinct_users().unwrap_or_default();
+        let mut user_holdings: Vec<(String, Vec<OpenHolding>)> = Vec::with_capacity(users.len());
+        let mut all_instruments: Vec<InstrumentKey> = Vec::new();
+        let mut seen_instruments: HashSet<InstrumentKey> = HashSet::new();
+
+        for (uid, fallback_name) in users {
+            let all_trades = db.get_trades(uid, None, None).unwrap_or_default();
+            if all_trades.is_empty() {
+                continue;
+            }
+            let username = all_trades
+                .first()
+                .map(|t| t.username.clone())
+                .unwrap_or(fallback_name);
+
+            type BucketKey = (String, String, u64);
+            let mut buckets: HashMap<BucketKey, Vec<Trade>> = HashMap::new();
+            let mut order: Vec<BucketKey> = Vec::new();
+            for trade in all_trades {
+                let key = (
+                    trade.symbol.clone(),
+                    trade.market.clone(),
+                    trade.leverage.to_bits(),
+                );
+                let list = buckets.entry(key.clone()).or_insert_with(|| {
+                    order.push(key);
+                    Vec::new()
+                });
+                list.push(trade);
+            }
+
+            let mut holdings = Vec::new();
+            for key in order {
+                let hist = calculate_trade_history(&buckets[&key]);
+                if hist.qty == 0 {
+                    continue;
+                }
+                let currency = if !hist.currency.is_empty() {
+                    hist.currency
+                } else {
+                    market_currency(&key.0, Some(&key.1)).to_string()
+                };
+                let ik = (key.0.clone(), key.1.clone());
+                if seen_instruments.insert(ik.clone()) {
+                    all_instruments.push(ik);
+                }
+                holdings.push(OpenHolding {
+                    symbol: key.0,
+                    market: key.1,
+                    qty: hist.qty,
+                    currency,
+                });
+            }
+
+            if !holdings.is_empty() {
+                user_holdings.push((username, holdings));
+            }
+        }
+
+        if all_instruments.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let qmap = quotes.get_quotes(&all_instruments).await;
+        let mut rate_map: HashMap<String, f64> = HashMap::new();
+        for (_, holdings) in &user_holdings {
+            for h in holdings {
+                let norm = normalize_symbol(&h.symbol).unwrap_or_else(|_| h.symbol.clone());
+                let valid = qmap.get(&(norm, h.market.clone())).is_some_and(|q| {
+                    q.price.is_finite()
+                        && q.price > 0.0
+                        && q.prev_close.is_finite()
+                        && q.prev_close > 0.0
+                });
+                if !valid {
+                    continue;
+                }
+                if !rate_map.contains_key(&h.currency) {
+                    let rate = quotes.get_rate(&h.currency).await?;
+                    rate_map.insert(h.currency.clone(), rate);
+                }
+            }
+        }
+
+        let mut results: Vec<UserTodayChange> = user_holdings
+            .into_iter()
+            .filter_map(|(username, holdings)| {
+                compute_user_today_change(username, &holdings, &qmap, &rate_map)
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.change_pct()
+                .total_cmp(&a.change_pct())
+                .then_with(|| b.change_cny.total_cmp(&a.change_cny))
+        });
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -483,5 +649,78 @@ mod tests {
         assert_eq!(fx.qty, 0);
         assert!((fx.realized_pnl - 200.0).abs() < 1e-9);
         assert!((fx.realized_pnl_cny - 280.0).abs() < 1e-9);
+    }
+
+    fn mk_quote(symbol: &str, market: &str, price: f64, prev_close: f64) -> Quote {
+        Quote {
+            symbol: symbol.into(),
+            name: symbol.into(),
+            price,
+            open: prev_close,
+            prev_close,
+            high: price.max(prev_close),
+            low: price.min(prev_close),
+            market: market.into(),
+        }
+    }
+
+    #[test]
+    fn today_change_handles_long_short_fx_and_missing_quotes() {
+        let mut qmap = HashMap::new();
+        qmap.insert(
+            ("600000".into(), "A".into()),
+            mk_quote("600000", "A", 10.5, 10.0), // +5%
+        );
+        qmap.insert(
+            ("AAPL".into(), "US".into()),
+            mk_quote("AAPL", "US", 95.0, 100.0), // -5%
+        );
+        qmap.insert(
+            ("000001".into(), "A".into()),
+            mk_quote("000001", "A", 10.0, 0.0), // invalid prev_close -> skipped
+        );
+        let rate_map = HashMap::from([("CNY".into(), 1.0), ("USD".into(), 7.0)]);
+
+        // Long 100 shares of 600000 (prev MV=1000, chg=+50)
+        // Short 10 shares of AAPL (prev MV=1000*7=7000, chg=-10*(-5)*7=+350)
+        // Invalid 000001 skipped
+        let holdings = vec![
+            OpenHolding {
+                symbol: "600000".into(),
+                market: "A".into(),
+                qty: 10000,
+                currency: "CNY".into(),
+            },
+            OpenHolding {
+                symbol: "AAPL".into(),
+                market: "US".into(),
+                qty: -1000,
+                currency: "USD".into(),
+            },
+            OpenHolding {
+                symbol: "000001".into(),
+                market: "A".into(),
+                qty: 10000,
+                currency: "CNY".into(),
+            },
+        ];
+
+        let res = compute_user_today_change("alice".into(), &holdings, &qmap, &rate_map).unwrap();
+        assert!((res.prev_market_value_cny - 8000.0).abs() < 1e-9);
+        assert!((res.change_cny - 400.0).abs() < 1e-9);
+        assert!((res.change_pct() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn today_change_returns_none_without_valid_quotes() {
+        let qmap = HashMap::new();
+        let rate_map = HashMap::from([("CNY".into(), 1.0)]);
+        let holdings = vec![OpenHolding {
+            symbol: "600000".into(),
+            market: "A".into(),
+            qty: 10000,
+            currency: "CNY".into(),
+        }];
+        assert!(compute_user_today_change("bob".into(), &holdings, &qmap, &rate_map).is_none());
     }
 }

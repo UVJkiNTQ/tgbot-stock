@@ -36,6 +36,7 @@ export TG_BOT_TOKEN="你的Bot Token"
 | `/position` | 查看持仓和浮盈 | `/position` |
 | `/pnl` | 查看已实现收益、浮动盈亏和历史总收益 | `/pnl` |
 | `/lb [u\|r]` | 总收益排行（u，默认）或仅已实现收益排行（r） | `/lb` 或 `/lb r` |
+| `/today` | 今日持仓市值变动比例排行（CNY口径） | `/today` |
 | `/trades` | 查看交易记录（含ID） | `/trades` |
 | `/del ID [ID ...]` | 按ID删除一条或多条交易记录 | `/del 3` 或 `/del 3 5 8` |
 | `/del SYMBOL Nx` | 删除指定代码、杠杆的全部交易记录 | `/del 600000 5x` |

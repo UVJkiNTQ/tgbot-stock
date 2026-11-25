@@ -52,6 +52,7 @@ fn bot_commands() -> Vec<BotCommand> {
         BotCommand::new("position", "查看我的持仓和浮盈"),
         BotCommand::new("pnl", "查看历史已实现收益和浮盈"),
         BotCommand::new("lb", "收益排行：/lb u 或 /lb r"),
+        BotCommand::new("today", "今日市值变动比例排行"),
         BotCommand::new("trades", "查看我的交易记录（含ID）"),
         BotCommand::new("del", "按ID或代码+杠杆删除记录"),
         BotCommand::new("update", "规整旧数据库（可重复安全执行）"),

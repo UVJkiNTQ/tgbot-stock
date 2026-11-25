@@ -114,6 +114,7 @@ pub async fn dispatch_update(state: Arc<AppState>, update: Update) {
             "position" => reports::cmd_position(&state, &msg).await,
             "pnl" => reports::cmd_pnl(&state, &msg).await,
             "lb" | "leaderboard" => reports::cmd_leaderboard(&state, &msg, &cmd).await,
+            "today" => reports::cmd_today(&state, &msg).await,
             "trades" => reports::cmd_trades(&state, &msg).await,
             "del" => reports::cmd_delete(&state, &msg, &cmd).await,
             _ => {}

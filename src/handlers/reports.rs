@@ -3,7 +3,7 @@ use crate::handlers::common::{
 };
 use crate::handlers::AppState;
 use crate::models::{Side, Trade};
-use crate::pnl::UserPnl;
+use crate::pnl::{UserPnl, UserTodayChange};
 use crate::telegram::{CommandObject, Message};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
@@ -356,6 +356,57 @@ pub async fn cmd_leaderboard(state: &AppState, msg: &Message, cmd: &CommandObjec
     let _ = state.bot.reply_text(msg, &lines.join("\n"), None).await;
 }
 
+pub fn today_leaderboard_lines(board: &[UserTodayChange]) -> Vec<String> {
+    let mut lines = vec!["今日市值变动排行榜（CNY口径）：\n".to_string()];
+    for (idx, item) in board.iter().enumerate() {
+        let pct = item.change_pct();
+        let sign = if pct >= 0.0 { "+" } else { "" };
+        let amount_sign = if item.change_cny >= 0.0 { "+" } else { "-" };
+        let medal = match idx {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            n => format!("{}.", n + 1),
+        };
+        lines.push(format!(
+            "{medal} {}  {sign}{pct:.2}%  ({amount_sign}¥{})",
+            item.username,
+            format_with_commas(item.change_cny.abs(), 2),
+        ));
+    }
+    lines
+}
+
+pub async fn cmd_today(state: &AppState, msg: &Message) {
+    let board = match state
+        .pnl
+        .compute_today_leaderboard(&state.db, &state.quotes)
+        .await
+    {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = state
+                .bot
+                .reply_text(msg, "暂时无法获取外币汇率，请稍后重试", None)
+                .await;
+            return;
+        }
+    };
+
+    if board.is_empty() {
+        let _ = state
+            .bot
+            .reply_text(msg, "当前没有人持有可计算今日变动的持仓", None)
+            .await;
+        return;
+    }
+
+    let _ = state
+        .bot
+        .reply_text(msg, &today_leaderboard_lines(&board).join("\n"), None)
+        .await;
+}
+
 pub fn trade_lines(trades: &[Trade], limit: usize, tz: Tz) -> String {
     let start = trades.len().saturating_sub(limit);
     let mut lines = Vec::new();
@@ -562,5 +613,25 @@ mod tests {
             format_trade_time("2026-09-02T20:00:00+00:00", tz),
             "2026-09-03 04:00:00"
         );
+    }
+
+    #[test]
+    fn today_leaderboard_formats_medals_and_signs() {
+        let board = vec![
+            UserTodayChange {
+                username: "alice".into(),
+                change_cny: 1234.5,
+                prev_market_value_cny: 10000.0,
+            },
+            UserTodayChange {
+                username: "bob".into(),
+                change_cny: -250.0,
+                prev_market_value_cny: 10000.0,
+            },
+        ];
+        let text = today_leaderboard_lines(&board).join("\n");
+        assert!(text.contains("今日市值变动排行榜（CNY口径）："));
+        assert!(text.contains("🥇 alice  +12.35%  (+¥1,234.50)"));
+        assert!(text.contains("🥈 bob  -2.50%  (-¥250.00)"));
     }
 }
